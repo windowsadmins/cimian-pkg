@@ -1,0 +1,5 @@
+product:
+  name: ExamplePackage
+  version: 1.0.0
+  manufacturer: ExampleCorp
+install_path: "C:\\Program Files\\ExamplePackage"
