@@ -30,7 +30,7 @@ This tool allows for pre- and post-installation scripts, dynamic file inclusion,
 
 Clone the repository:
 
-```bash
+```shell
 git clone https://github.com/rodchristiansen/gorilla-pkg.git
 cd gorilla-pkg
 ```
@@ -43,8 +43,8 @@ project/
 ├── payload/                   # Files/folders to be written to disk
 │   └── example.txt
 ├── scripts/                   # Pre-/Post-install scripts
-│   ├── preinstall.ps1         # Pre-install script
-│   ├── postinstall.ps1        # Post-install chocolateyInstall script
+│   ├── preinstall.ps1         
+│   └── postinstall.ps1        
 └── build-info.yaml            # Metadata for package generation
 ```
 
@@ -66,7 +66,7 @@ install_path: "C:\Program Files\Gorilla"
 
 To create a new package:
 
-```bash
+```shell
 gorillapkg <project_dir>
 ```
 
@@ -86,12 +86,12 @@ This will:
 ### Example Command to Build and Install
 
 1. **Build the `.nupkg`**:
-   ```bash
+   ```shell
    nuget pack gorilla.nuspec
    ```
 
 2. **Install with Chocolatey**:
-   ```bash
+   ```shell
    choco install Gorilla --source="path/to/package"
    ```
 
