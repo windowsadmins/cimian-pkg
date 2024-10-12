@@ -144,8 +144,39 @@ func createProjectDirectory(projectDir string) error {
     return nil
 }
 
-// Generate the .nuspec XML file
+// Generate the .nuspec XML file based on available files and scripts.
 func generateNuspec(buildInfo *BuildInfo) error {
+    var files []FileRef
+
+    // Check if the payload directory exists and add it.
+    payloadPath := "payload\\**"
+    if _, err := os.Stat("payload"); err == nil {
+        files = append(files, FileRef{Src: payloadPath, Target: buildInfo.InstallPath})
+    } else {
+        log.Println("No payload found. Skipping payload packaging.")
+    }
+
+    // Check if preinstall.ps1 exists and map to tools/install.ps1.
+    if _, err := os.Stat("scripts/preinstall.ps1"); err == nil {
+        files = append(files, FileRef{
+            Src:    "scripts\\preinstall.ps1",
+            Target: "tools\\install.ps1",
+        })
+    } else {
+        log.Println("No preinstall.ps1 script found.")
+    }
+
+    // Check if postinstall.ps1 exists and map to tools/chocolateyInstall.ps1.
+    if _, err := os.Stat("scripts/postinstall.ps1"); err == nil {
+        files = append(files, FileRef{
+            Src:    "scripts\\postinstall.ps1",
+            Target: "tools\\chocolateyInstall.ps1",
+        })
+    } else {
+        log.Println("No postinstall.ps1 script found.")
+    }
+
+    // Define the .nuspec metadata and package structure.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Name,
@@ -153,15 +184,10 @@ func generateNuspec(buildInfo *BuildInfo) error {
             Authors:     buildInfo.Product.Manufacturer,
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
-        Files: []FileRef{
-            {Src: "payload\\**", Target: buildInfo.InstallPath},
-            // Map preinstall.ps1 to install.ps1 for Chocolatey
-            {Src: "scripts\\preinstall.ps1", Target: "tools\\install.ps1"},
-            // Map postinstall.ps1 to chocolateyInstall.ps1 for Chocolatey
-            {Src: "scripts\\postinstall.ps1", Target: "tools\\chocolateyInstall.ps1"},
-        },
+        Files: files,
     }
 
+    // Write the .nuspec file.
     file, err := os.Create(buildInfo.Product.Name + ".nuspec")
     if err != nil {
         return err
