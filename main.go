@@ -96,6 +96,21 @@ func getStandardDirectories() map[string]string {
         "C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local": "LocalAppDataFolder",
     }
 }
+
+// resolveInstallLocation ensures the install location is valid, using standard directories if applicable.
+func resolveInstallLocation(installLocation string, dirs map[string]string) string {
+    normalized := NormalizePath(installLocation)
+
+    // Check if the path matches any of the standard Windows directories.
+    if identifier, exists := dirs[normalized]; exists {
+        log.Printf("Install location matched to: %s (%s)", normalized, identifier)
+        return identifier
+    }
+
+    log.Printf("Using custom install location: %s", normalized)
+    return normalized
+}
+
 // readBuildInfo loads and parses build-info.yaml from the given directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
     data, err := os.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
@@ -199,16 +214,11 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Fetch standard Windows directories (if applicable)
     dirs := getStandardDirectories()
 
-    // Attempt to map install_location to a known Windows directory identifier.
-    installLocation := buildInfo.InstallLocation
-    if standardPath, exists := dirs[installLocation]; exists {
-        log.Printf("Mapped %s to %s", installLocation, standardPath)
-        installLocation = standardPath
-    }
+    // Resolve the install location from the YAML, using standard directories if applicable.
+    resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
-    // Define the package structure using the resolved install location.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -217,12 +227,11 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
         Files: []FileRef{
-            {Src: "payload/**", Target: installLocation},
+            {Src: "payload/**", Target: resolvedLocation},
             {Src: "scripts/postinstall.ps1", Target: "tools/chocolateyInstall.ps1"},
         },
     }
 
-    // Create the .nuspec file.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
