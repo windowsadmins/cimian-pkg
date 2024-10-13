@@ -262,6 +262,12 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
 
+    // Manually insert the <requireAdministrator>true</requireAdministrator> tag.
+    adminTag := "  <requireAdministrator>true</requireAdministrator>\n"
+    if _, err := file.WriteString(adminTag); err != nil {
+        return "", fmt.Errorf("failed to write admin tag: %w", err)
+    }
+
     return nuspecPath, nil
 }
 
