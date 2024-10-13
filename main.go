@@ -5,7 +5,6 @@ import (
     "flag"
     "fmt"
     "gopkg.in/yaml.v2"
-    "io/ioutil"
     "log"
     "os"
     "os/exec"
