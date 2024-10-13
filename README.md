@@ -16,8 +16,6 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 - **Automated Packaging**: Uses `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Gorilla**.
 - **YAML-Driven Configuration**: All metadata and installation instructions come from the `build-info.yaml` file.
 
----
-
 ### Prerequisites
 
 #### **For Development:**
@@ -29,8 +27,6 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 - **PowerShell** (to run pre- and post-installation scripts).
 - **Windows SDK** (for the `SignTool` utility).
 
----
-
 ### Installation
 
 Clone the repository:
@@ -39,8 +35,6 @@ Clone the repository:
 git clone https://github.com/rodchristiansen/gorilla-pkg.git
 cd gorilla-pkg
 ```
-
----
 
 ### Folder Structure for Packages
 
@@ -100,7 +94,6 @@ signing_certificate: "Gorilla Corp EV Certificate"
 - **`signing_certificate`:**  
   The name of the certificate to be used for signing the package using `SignTool`. Digital signing ensures the authenticity and integrity of the package, making it trusted by Windows.
 
-
 ### Usage
 
 To create a new package:
@@ -116,15 +109,11 @@ This command will:
 4. Optionally sign the package if `identity` is specified in the YAML file.
 5. Perform any specified post-install action (logout or restart).
 
----
-
 ### Script Execution
 
 - **Pre-Install**: `scripts/preinstall.ps1` runs before copying files to the target directory.
 - **Post-Install**: `scripts/postinstall.ps1` runs after installation and acts as Chocolatey’s `chocolateyInstall.ps1`.
 - Scripts can handle tasks like **service setup**, **configuration**, or **clean-up**.
-
----
 
 ### Package Signing with `SignTool`
 
@@ -152,8 +141,6 @@ This command will:
    signtool
    ```
 
----
-
 ### Example Commands
 
 1. **Build the `.nupkg`**:
@@ -174,8 +161,6 @@ This command will:
    gorilla install Gorilla --source="path/to/package"
    ```
 
----
-
 ### Handling Post-Install Actions
 
 The `postinstall_action` key in the YAML file allows for **system-level actions** post installation:
@@ -184,8 +169,6 @@ The `postinstall_action` key in the YAML file allows for **system-level actions*
 - **`restart`**: The system restarts immediately.
 
 The actions are executed using PowerShell commands during installation.
-
----
 
 ### Example Output
 
@@ -206,8 +189,6 @@ Package signed successfully.
 Executing post-install action: restart
 Restarting system...
 ```
-
----
 
 ### Summary
 
