@@ -233,9 +233,6 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Fetch standard Windows directories (if applicable).
     dirs := getStandardDirectories()
 
-    // Resolve the install location from the YAML.
-    resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
-
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
     // Define the package metadata.
