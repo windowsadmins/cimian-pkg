@@ -28,11 +28,13 @@ jobs:
         echo "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
     - name: Build Binaries
+      shell: pwsh
       run: |
-        for /D %%D in (cmd/*) do (
-          cd %%D
+        Get-ChildItem cmd -Directory | ForEach-Object {
+          Set-Location $_.FullName
           go build -o bin/
-        )
+          Set-Location ..
+        }
 
     - name: Package Binaries
       run: |
