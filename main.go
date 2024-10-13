@@ -271,6 +271,28 @@ func handlePostInstallAction(action string) {
     }
 }
 
+// Sign the package using SignTool if certificate is provided
+func signPackage(nupkgFile, certificate string) error {
+    log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
+    cmd := exec.Command(
+        "signtool", "sign",
+        "/n", certificate,
+        "/fd", "SHA256",
+        "/tr", "http://timestamp.digicert.com",
+        "/td", "SHA256",
+        nupkgFile,
+    )
+    cmd.Stdout = os.Stdout
+    cmd.Stderr = os.Stderr
+
+    if err := cmd.Run(); err != nil {
+        return fmt.Errorf("failed to sign package: %w", err)
+    }
+
+    log.Println("Package signed successfully.")
+    return nil
+}
+
 // Main function
 func main() {
     var projectDir string
