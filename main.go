@@ -263,7 +263,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
                 }
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
-                    Target: filepath.Join(resolvedLocation, filepath.Base(relPath)),
+                    Target: filepath.Base(relPath),
                 })
             }
             return nil
