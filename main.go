@@ -238,7 +238,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
-    // Define the package metadata with the 'admin' tag.
+    // Define the package metadata.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -249,24 +249,24 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Add files conditionally based on their presence.
+    // Add files conditionally based on what is present.
     if _, err := os.Stat(filepath.Join(projectDir, "payload")); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "payload/**",
+            Src:    filepath.Join("payload", "**"),
             Target: resolvedLocation,
         })
     }
 
     if _, err := os.Stat(filepath.Join(projectDir, "scripts", "preinstall.ps1")); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "scripts/preinstall.ps1",
+            Src:    filepath.Join("scripts", "preinstall.ps1"),
             Target: "tools/chocolateyBeforeModify.ps1",
         })
     }
 
     if _, err := os.Stat(filepath.Join(projectDir, "scripts", "postinstall.ps1")); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "scripts/postinstall.ps1",
+            Src:    filepath.Join("scripts", "postinstall.ps1"),
             Target: "tools/chocolateyInstall.ps1",
         })
     }
@@ -282,7 +282,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
 
-    // Encode the package structure into XML.
+    // Start encoding the package structure.
     if err := encoder.Encode(nuspec); err != nil {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
