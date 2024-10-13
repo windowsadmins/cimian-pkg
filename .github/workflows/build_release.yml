@@ -8,7 +8,6 @@ on:
 permissions:
   contents: write
   packages: write
-  metadata: read
 
 jobs:
   build:
