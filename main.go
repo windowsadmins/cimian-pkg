@@ -327,15 +327,18 @@ func main() {
         log.Fatalf("Error reading build-info.yaml: %v", err)
     }
 
-    // Validate the post-install action.
-    validActions := map[string]bool{"none": true, "logout": true, "restart": true}
-    if !validActions[buildInfo.PostInstallAction] {
-        log.Fatalf("Invalid post-install action: %s", buildInfo.PostInstallAction)
-    }
+    // If postinstall_action is present, handle it.
+    if buildInfo.PostInstallAction != "" {
+        validActions := map[string]bool{"none": true, "logout": true, "restart": true}
+        if !validActions[buildInfo.PostInstallAction] {
+            log.Fatalf("Invalid post-install action: %s", buildInfo.PostInstallAction)
+        }
 
-    // Handle the post-install script if necessary.
-    if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
-        log.Fatalf("Error handling post-install script: %v", err)
+        if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
+            log.Fatalf("Error handling post-install script: %v", err)
+        }
+    } else {
+        log.Println("No post-install action required.")
     }
 
     // Create the required directories inside the project.
