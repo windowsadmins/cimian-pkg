@@ -163,13 +163,14 @@ func parseVersion(versionStr string) (string, error) {
 
 // createProjectDirectory ensures necessary project directories exist.
 func createProjectDirectory(projectDir string) error {
-    paths := []string{
-        filepath.Join(projectDir, "payload"),
-        filepath.Join(projectDir, "scripts"),
-        filepath.Join(projectDir, "build"),
+    subDirs := []string{
+        "payload",
+        "scripts",
+        "build",
     }
-    for _, path := range paths {
-        fullPath := filepath.Join(projectDir, path)
+
+    for _, subDir := range subDirs {
+        fullPath := filepath.Join(projectDir, subDir)
         if err := os.MkdirAll(fullPath, os.ModePerm); err != nil {
             return fmt.Errorf("failed to create directory %s: %w", fullPath, err)
         }
