@@ -62,12 +62,12 @@ Here’s the structured YAML and the detailed explainer added as a separate sect
 
 ```yaml
 product:
-  identifier: "com.gorillacorp.gorilla"
-  version: "1.0.0"
   name: "Gorilla"
+  version: "2024.10.11"
+  identifier: "com.gorillacorp.gorilla"
   publisher: "Gorilla Corp"
-install_location: "C:\\Program Files\\Gorilla"
-postinstall_action: "restart"
+install_location: "C:\Program Files\Gorilla"
+postinstall_action: "none"
 signing_certificate: "Gorilla Corp EV Certificate"
 ```
 
