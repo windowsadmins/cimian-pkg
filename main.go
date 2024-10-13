@@ -286,8 +286,10 @@ func signPackage(nupkgFile, certificate string) error {
 
 // check nuget is installed
 func checkNuGet() {
-    if err := runCommand("nuget", "-v"); err != nil {
-        log.Fatalf("NuGet is not installed or not in PATH: %v", err)
+    if err := runCommand("nuget", "locals", "all", "-list"); err != nil {
+        log.Fatalf(`NuGet is not installed or not in PATH. 
+You can install it via Chocolatey: 
+  choco install nuget.commandline`)
     }
 }
 
