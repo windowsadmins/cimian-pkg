@@ -158,10 +158,21 @@ func handlePostInstallScript(action, projectDir string) error {
     return nil
 }
 
-// Generate the .nuspec file
+// generateNuspec creates a .nuspec file, resolving install locations flexibly.
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
+    // Fetch standard Windows directories (if applicable)
+    dirs := getStandardDirectories()
+
+    // Attempt to map install_location to a known Windows directory identifier.
+    installLocation := buildInfo.InstallLocation
+    if standardPath, exists := dirs[installLocation]; exists {
+        log.Printf("Mapped %s to %s", installLocation, standardPath)
+        installLocation = standardPath
+    }
+
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
+    // Define the package structure using the resolved install location.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -170,21 +181,22 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
         Files: []FileRef{
-            {Src: "payload/**", Target: buildInfo.InstallLocation},
+            {Src: "payload/**", Target: installLocation},
             {Src: "scripts/postinstall.ps1", Target: "tools/chocolateyInstall.ps1"},
         },
     }
 
+    // Create the .nuspec file.
     file, err := os.Create(nuspecPath)
     if err != nil {
-        return "", err
+        return "", fmt.Errorf("failed to create .nuspec file: %w", err)
     }
     defer file.Close()
 
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
     if err := encoder.Encode(nuspec); err != nil {
-        return "", err
+        return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
 
     return nuspecPath, nil
