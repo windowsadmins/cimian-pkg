@@ -30,15 +30,16 @@ type BuildInfo struct {
 type Package struct {
     XMLName  xml.Name  `xml:"package"`
     Metadata Metadata  `xml:"metadata"`
-    Files    []FileRef `xml:"files>file"`
+    Files    []FileRef `xml:"files>file,omitempty"`
 }
 
 // Metadata stores the package metadata.
 type Metadata struct {
-    ID          string `xml:"id"`
-    Version     string `xml:"version"`
-    Authors     string `xml:"authors"`
-    Description string `xml:"description"`
+    ID                 string `xml:"id"`
+    Version            string `xml:"version"`
+    Authors            string `xml:"authors"`
+    Description        string `xml:"description"`
+    RequireAdmin       bool   `xml:"requireAdministrator"`
 }
 
 // FileRef defines the source and target paths for files.
@@ -229,65 +230,52 @@ func handlePostInstallScript(action, projectDir string) error {
 
 // generateNuspec creates a .nuspec file, resolving install locations flexibly.
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Fetch standard Windows directories (if applicable)
+    // Fetch standard Windows directories (if applicable).
     dirs := getStandardDirectories()
-
-    // Resolve the install location from the YAML, using standard directories if applicable.
     resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
-    // Define the package metadata.
-    nuspec := Package{
-        Metadata: Metadata{
-            ID:          buildInfo.Product.Identifier,
-            Version:     buildInfo.Product.Version,
-            Authors:     buildInfo.Product.Publisher,
-            Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
-        },
+    // Create the Metadata section.
+    metadata := Metadata{
+        ID:           buildInfo.Product.Identifier,
+        Version:      buildInfo.Product.Version,
+        Authors:      buildInfo.Product.Publisher,
+        Description:  fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
+        RequireAdmin: true, // Always require admin privileges.
     }
 
-    // Add files conditionally based on what is present.
+    // Collect the files to be included based on their presence.
+    var files []FileRef
     if _, err := os.Stat(filepath.Join(projectDir, "payload")); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "payload/**",
-            Target: resolvedLocation,
-        })
+        files = append(files, FileRef{Src: "payload/**", Target: resolvedLocation})
     }
-
     if _, err := os.Stat(filepath.Join(projectDir, "scripts", "preinstall.ps1")); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "scripts/preinstall.ps1",
-            Target: "tools/chocolateyBeforeModify.ps1",
-        })
+        files = append(files, FileRef{Src: "scripts/preinstall.ps1", Target: "tools/chocolateyBeforeModify.ps1"})
     }
-
     if _, err := os.Stat(filepath.Join(projectDir, "scripts", "postinstall.ps1")); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "scripts/postinstall.ps1",
-            Target: "tools/chocolateyInstall.ps1",
-        })
+        files = append(files, FileRef{Src: "scripts/postinstall.ps1", Target: "tools/chocolateyInstall.ps1"})
     }
 
-    // Open the .nuspec file for writing.
+    // Create the complete Package struct.
+    nuspec := Package{
+        Metadata: metadata,
+        Files:    files,
+    }
+
+    // Create and open the .nuspec file for writing.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
     }
     defer file.Close()
 
-    // Create an XML encoder and format the output.
+    // Encode the struct to XML with indentation.
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
 
-    // Start encoding the package structure.
     if err := encoder.Encode(nuspec); err != nil {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
-    }
-
-    // Write the <requireAdministrator> tag inside the <metadata> section.
-    if _, err := file.WriteString("  <metadata>\n    <requireAdministrator>true</requireAdministrator>\n  </metadata>\n"); err != nil {
-        return "", fmt.Errorf("failed to write admin tag: %w", err)
     }
 
     return nuspecPath, nil
