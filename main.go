@@ -237,6 +237,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
+    // Define the package metadata.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -244,20 +245,42 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             Authors:     buildInfo.Product.Publisher,
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
-        Files: []FileRef{
-            {Src: "payload/**", Target: resolvedLocation},
-            {Src: "scripts/postinstall.ps1", Target: "tools/chocolateyInstall.ps1"},
-        },
     }
 
+    // Add files conditionally based on what is present.
+    if _, err := os.Stat(filepath.Join(projectDir, "payload")); !os.IsNotExist(err) {
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    "payload/**",
+            Target: resolvedLocation,
+        })
+    }
+
+    if _, err := os.Stat(filepath.Join(projectDir, "scripts", "preinstall.ps1")); !os.IsNotExist(err) {
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    "scripts/preinstall.ps1",
+            Target: "tools/chocolateyBeforeModify.ps1",
+        })
+    }
+
+    if _, err := os.Stat(filepath.Join(projectDir, "scripts", "postinstall.ps1")); !os.IsNotExist(err) {
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    "scripts/postinstall.ps1",
+            Target: "tools/chocolateyInstall.ps1",
+        })
+    }
+
+    // Open the .nuspec file for writing.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
     }
     defer file.Close()
 
+    // Create an XML encoder and format the output.
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
+
+    // Start encoding the package structure.
     if err := encoder.Encode(nuspec); err != nil {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
