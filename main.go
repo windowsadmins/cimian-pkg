@@ -14,7 +14,7 @@ import (
     "strings"
 )
 
-// Structs for YAML and XML parsing
+// BuildInfo holds package build information parsed from YAML.
 type BuildInfo struct {
     InstallLocation    string `yaml:"install_location"`
     PostInstallAction  string `yaml:"postinstall_action"`
@@ -27,12 +27,14 @@ type BuildInfo struct {
     } `yaml:"product"`
 }
 
+// Package defines the structure of a .nuspec package.
 type Package struct {
     XMLName  xml.Name  `xml:"package"`
     Metadata Metadata  `xml:"metadata"`
     Files    []FileRef `xml:"files>file"`
 }
 
+// Metadata stores the package metadata.
 type Metadata struct {
     ID          string `xml:"id"`
     Version     string `xml:"version"`
@@ -40,12 +42,13 @@ type Metadata struct {
     Description string `xml:"description"`
 }
 
+// FileRef defines the source and target paths for files.
 type FileRef struct {
     Src    string `xml:"src,attr"`
     Target string `xml:"target,attr"`
 }
 
-// Setup logging based on verbosity
+// setupLogging configures log output based on verbosity.
 func setupLogging(verbose bool) {
     log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
     if verbose {
@@ -55,26 +58,24 @@ func setupLogging(verbose bool) {
     }
 }
 
-// NormalizePath ensures paths use consistent backslashes for Windows
+// NormalizePath ensures paths use consistent separators across platforms.
 func NormalizePath(input string) string {
     return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
 }
 
-// Read and parse the build-info.yaml file
+// readBuildInfo loads and parses build-info.yaml from the given directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
-    data, err := ioutil.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
+    data, err := os.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
     if err != nil {
-        return nil, err
+        return nil, fmt.Errorf("error reading build-info.yaml: %w", err)
     }
 
     var buildInfo BuildInfo
     if err := yaml.Unmarshal(data, &buildInfo); err != nil {
-        return nil, err
+        return nil, fmt.Errorf("error parsing YAML: %w", err)
     }
 
-    // Normalize the InstallLocation path
     buildInfo.InstallLocation = NormalizePath(buildInfo.InstallLocation)
-
     return &buildInfo, nil
 }
 
@@ -111,12 +112,12 @@ func createProjectDirectory(projectDir string) error {
     return nil
 }
 
-// Creates or appends to postinstall.ps1 based on post-install action
+// handlePostInstallScript manages the postinstall.ps1 file.
 func handlePostInstallScript(action, projectDir string) error {
     postInstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
     var command string
 
-    // Determine the command to append based on action
+    // Determine the command based on the action
     switch action {
     case "logout":
         command = "shutdown /l\n"
@@ -124,14 +125,15 @@ func handlePostInstallScript(action, projectDir string) error {
         command = "shutdown /r /t 0\n"
     case "none":
         log.Println("No post-install action required.")
-        return nil
+        return nil // No further action needed
     default:
         return fmt.Errorf("unknown post-install action: %s", action)
     }
 
-    // Check if postinstall.ps1 exists
+    // Check if postinstall.ps1 exists and handle appropriately
     var file *os.File
     if _, err := os.Stat(postInstallPath); os.IsNotExist(err) {
+        // Create a new postinstall.ps1 file
         log.Printf("Creating new postinstall.ps1: %s", postInstallPath)
         if err := os.MkdirAll(filepath.Dir(postInstallPath), os.ModePerm); err != nil {
             return fmt.Errorf("failed to create scripts directory: %v", err)
@@ -141,6 +143,7 @@ func handlePostInstallScript(action, projectDir string) error {
             return fmt.Errorf("failed to create postinstall.ps1: %v", err)
         }
     } else {
+        // Append to the existing postinstall.ps1 file
         log.Printf("Appending to existing postinstall.ps1: %s", postInstallPath)
         file, err = os.OpenFile(postInstallPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend)
         if err != nil {
@@ -202,12 +205,12 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     return nuspecPath, nil
 }
 
-// Run shell commands with logging
+// runCommand executes shell commands with logging.
 func runCommand(command string, args ...string) error {
+    log.Printf("Running: %s %v", command, args)
     cmd := exec.Command(command, args...)
     cmd.Stdout = os.Stdout
     cmd.Stderr = os.Stderr
-    log.Printf("Running: %s %v", command, args)
     return cmd.Run()
 }
 
@@ -246,21 +249,16 @@ func getStandardDirectories() map[string]string {
     }
 }
 
+// signPackage signs the .nupkg using SignTool.
 func signPackage(nupkgFile, certificate string) error {
     log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
-    cmd := exec.Command(
-        "signtool", "sign",
-        "/n", certificate,
-        "/fd", "SHA256",
-        "/tr", "http://timestamp.digicert.com",
-        "/td", "SHA256",
-        nupkgFile,
+    return runCommand(
+        "signtool", "sign", "/n", certificate,
+        "/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
+        "/td", "SHA256", nupkgFile,
     )
-    cmd.Stdout = os.Stdout
-    cmd.Stderr = os.Stderr
+}
 
-    if err := cmd.Run(); err != nil {
-        return fmt.Errorf("failed to sign package: %w", err)
 // check nuget is installed
 func checkNuGet() {
     if err := runCommand("nuget", "-v"); err != nil {
@@ -275,7 +273,7 @@ func checkSignTool() {
     }
 }
 
-// Main function
+// main is the entry point of the application.
 func main() {
     var projectDir string
     var verbose bool
@@ -283,38 +281,55 @@ func main() {
     flag.StringVar(&projectDir, "project", ".", "Project directory")
     flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
     flag.Parse()
+    log.Printf("Using project directory: %s", projectDir)
 
     setupLogging(verbose)
 
     buildInfo, err := readBuildInfo(projectDir)
     if err != nil {
-        log.Fatalf("Failed to read build-info.yaml: %v", err)
+        log.Fatalf("Error: %v", err)
+    }
+
+    // Validate post-install action
+    validActions := map[string]bool{"none": true, "logout": true, "restart": true}
+    if !validActions[buildInfo.PostInstallAction] {
+        log.Fatalf("Invalid post-install action: %s", buildInfo.PostInstallAction)
     }
 
     if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
-        log.Fatalf("Failed to handle post-install script: %v", err)
+        log.Fatalf("Error: %v", err)
     }
 
-    nuspecPath, err := generateNuspec(buildInfo, projectDir)
-    if err != nil {
-        log.Fatalf("Failed to generate .nuspec: %v", err)
+    if err := createProjectDirectory(projectDir); err != nil {
+        log.Fatalf("Error: %v", err)
     }
-    defer os.Remove(nuspecPath)
+    log.Printf("Directories created successfully.")
+    
+    var nuspecPath string
+    if np, err := generateNuspec(buildInfo, projectDir); err != nil {
+        log.Fatalf("Error: %v", err)
+    } else {
+        nuspecPath = np
+        defer os.Remove(nuspecPath)
+    }
+    log.Printf(".nuspec generated at: %s", nuspecPath)
+    
+    checkNuGet()
 
     buildDir := filepath.Join(projectDir, "build")
-    if err := os.MkdirAll(buildDir, os.ModePerm); err != nil {
-        log.Fatalf("Failed to create build directory: %v", err)
-    }
-
     nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+".nupkg")
+
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir); err != nil {
-        log.Fatalf("Failed to create .nupkg: %v", err)
+        log.Fatalf("Error: %v", err)
     }
 
     if buildInfo.SigningCertificate != "" {
-        if err := runCommand("signtool", "sign", "/n", buildInfo.SigningCertificate, "/fd", "SHA256", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", nupkgPath); err != nil {
-            log.Fatalf("Failed to sign package: %v", err)
+        checkSignTool()
+        if err := signPackage(nupkgPath, buildInfo.SigningCertificate); err != nil {
+            log.Fatalf("Failed to sign package %s: %v", nupkgPath, err)
         }
+    } else {
+        log.Println("No signing certificate provided. Skipping signing.")
     }
 
     log.Printf("Package created successfully: %s", nupkgPath)
