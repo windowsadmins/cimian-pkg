@@ -15,14 +15,16 @@ import (
 )
 
 // Structs for YAML and XML parsing
-
 type BuildInfo struct {
-    Product struct {
-        Name         string `yaml:"name"`
-        Version      string `yaml:"version"`
-        Manufacturer string `yaml:"manufacturer"`
+    InstallLocation    string `yaml:"install_location"`
+    PostInstallAction  string `yaml:"postinstall_action"`
+    SigningCertificate string `yaml:"signing_certificate,omitempty"`
+    Product            struct {
+        Identifier string `yaml:"identifier"`
+        Version    string `yaml:"version"`
+        Name       string `yaml:"name"`
+        Publisher  string `yaml:"publisher"`
     } `yaml:"product"`
-    InstallPath string `yaml:"install_path"`
 }
 
 type Package struct {
@@ -61,11 +63,9 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
     }
 
     var buildInfo BuildInfo
-    err = yaml.Unmarshal(data, &buildInfo)
-    if err != nil {
+    if err = yaml.Unmarshal(data, &buildInfo); err != nil {
         return nil, err
     }
-
     return &buildInfo, nil
 }
 
@@ -130,7 +130,7 @@ func parseVersion(versionStr string) (string, error) {
     return fmt.Sprintf("%d.%d.%d", major, minor, build), nil
 }
 
-// Create necessary directories (payload and scripts)
+// Create required directories for the project
 func createProjectDirectory(projectDir string) error {
     paths := []string{
         filepath.Join(projectDir, "payload"),
@@ -144,7 +144,7 @@ func createProjectDirectory(projectDir string) error {
     return nil
 }
 
-// Generate the .nuspec XML file based on available files and scripts.
+// Generate the .nuspec file from build-info.yaml
 func generateNuspec(buildInfo *BuildInfo) error {
     var files []FileRef
 
@@ -179,9 +179,9 @@ func generateNuspec(buildInfo *BuildInfo) error {
     // Define the .nuspec metadata and package structure.
     nuspec := Package{
         Metadata: Metadata{
-            ID:          buildInfo.Product.Name,
+            ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
-            Authors:     buildInfo.Product.Manufacturer,
+            Authors:     buildInfo.Product.Publisher,
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
         Files: files,
@@ -199,13 +199,12 @@ func generateNuspec(buildInfo *BuildInfo) error {
     return encoder.Encode(nuspec)
 }
 
-// Execute shell commands (e.g., nuget pack)
+// Run shell commands with logging
 func runCommand(command string, args ...string) error {
     cmd := exec.Command(command, args...)
     cmd.Stdout = os.Stdout
     cmd.Stderr = os.Stderr
-
-    log.Printf("Running command: %s %v", command, args)
+    log.Printf("Running: %s %v", command, args)
     return cmd.Run()
 }
 
@@ -298,8 +297,8 @@ func main() {
     var projectDir string
     var verbose bool
 
-    flag.StringVar(&projectDir, "project", ".", "The project directory to build.")
-    flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging.")
+    flag.StringVar(&projectDir, "project", ".", "Project directory")
+    flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
     flag.Parse()
 
     setupLogging(verbose)
@@ -313,19 +312,30 @@ func main() {
     if err != nil {
         log.Fatalf("Invalid version format: %v", err)
     }
-    log.Printf("Parsed version: %s", version)
+    log.Printf("Version: %s", version)
 
     if err := createProjectDirectory(projectDir); err != nil {
-        log.Fatalf("Failed to create project directory: %v", err)
+        log.Fatalf("Failed to create directories: %v", err)
     }
 
     if err := generateNuspec(buildInfo); err != nil {
-        log.Fatalf("Failed to generate .nuspec file: %v", err)
+        log.Fatalf("Failed to generate .nuspec: %v", err)
     }
 
+    nupkgFile := buildInfo.Product.Name + ".nupkg"
     if err := runCommand("nuget", "pack", buildInfo.Product.Name+".nuspec"); err != nil {
-        log.Fatalf("Failed to run nuget pack: %v", err)
+        log.Fatalf("Failed to create .nupkg: %v", err)
     }
+
+    if buildInfo.SigningCertificate != "" {
+        if err := signPackage(nupkgFile, buildInfo.SigningCertificate); err != nil {
+            log.Fatalf("Failed to sign package: %v", err)
+        }
+    } else {
+        log.Println("No identity provided. Skipping package signing.")
+    }
+
+    handlePostInstallAction(buildInfo.PostInstallAction)
 
     log.Println("Package created successfully.")
 }
