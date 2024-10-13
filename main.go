@@ -289,10 +289,18 @@ func signPackage(nupkgFile, certificate string) error {
 
     if err := cmd.Run(); err != nil {
         return fmt.Errorf("failed to sign package: %w", err)
+// check nuget is installed
+func checkNuGet() {
+    if err := runCommand("nuget", "-v"); err != nil {
+        log.Fatalf("NuGet is not installed or not in PATH: %v", err)
     }
+}
 
-    log.Println("Package signed successfully.")
-    return nil
+// check signtool is installed
+func checkSignTool() {
+    if err := runCommand("signtool", "-?"); err != nil {
+        log.Fatalf("SignTool is not installed or not available: %v", err)
+    }
 }
 
 // Main function
