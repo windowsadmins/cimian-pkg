@@ -55,6 +55,11 @@ func setupLogging(verbose bool) {
     }
 }
 
+// NormalizePath ensures paths use consistent backslashes for Windows
+func NormalizePath(input string) string {
+    return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
+}
+
 // Read and parse the build-info.yaml file
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
     data, err := ioutil.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
@@ -63,9 +68,13 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
     }
 
     var buildInfo BuildInfo
-    if err = yaml.Unmarshal(data, &buildInfo); err != nil {
+    if err := yaml.Unmarshal(data, &buildInfo); err != nil {
         return nil, err
     }
+
+    // Normalize the InstallLocation path
+    buildInfo.InstallLocation = NormalizePath(buildInfo.InstallLocation)
+
     return &buildInfo, nil
 }
 
