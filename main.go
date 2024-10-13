@@ -57,6 +57,23 @@ func setupLogging(verbose bool) {
     }
 }
 
+// verifyProjectStructure checks that required files and folders exist.
+func verifyProjectStructure(projectDir string) error {
+    requiredPaths := []string{
+        "build-info.yaml",
+        "payload", // Payload folder must exist
+        "scripts", // Scripts folder must exist
+    }
+
+    for _, path := range requiredPaths {
+        fullPath := filepath.Join(projectDir, path)
+        if _, err := os.Stat(fullPath); os.IsNotExist(err) {
+            return fmt.Errorf("required path %s is missing", fullPath)
+        }
+    }
+    return nil
+}
+
 // NormalizePath ensures paths use consistent separators across platforms.
 func NormalizePath(input string) string {
     return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
@@ -113,7 +130,8 @@ func resolveInstallLocation(installLocation string, dirs map[string]string) stri
 
 // readBuildInfo loads and parses build-info.yaml from the given directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
-    data, err := os.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
+    path := filepath.Join(projectDir, "build-info.yaml")
+    data, err := os.ReadFile(path)
     if err != nil {
         return nil, fmt.Errorf("error reading build-info.yaml: %w", err)
     }
@@ -123,7 +141,6 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
         return nil, fmt.Errorf("error parsing YAML: %w", err)
     }
 
-    buildInfo.InstallLocation = NormalizePath(buildInfo.InstallLocation)
     return &buildInfo, nil
 }
 
@@ -288,7 +305,7 @@ func main() {
     if len(os.Args) < 2 {
         log.Fatalf("Usage: %s <project_directory>", os.Args[0])
     }
-    projectDir := os.Args[1]
+    projectDir := NormalizePath(os.Args[1])
 
     // Parse any additional flags.
     flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
@@ -300,14 +317,14 @@ func main() {
 
     // Verify the project structure exists and is valid.
     if err := verifyProjectStructure(projectDir); err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error verifying project structure: %v", err)
     }
     log.Println("Project structure verified. Proceeding with package creation...")
 
     // Read build-info.yaml from the provided project directory.
     buildInfo, err := readBuildInfo(projectDir)
     if err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error reading build-info.yaml: %v", err)
     }
 
     // Validate the post-install action.
@@ -318,19 +335,19 @@ func main() {
 
     // Handle the post-install script if necessary.
     if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error handling post-install script: %v", err)
     }
 
     // Create the required directories inside the project.
     if err := createProjectDirectory(projectDir); err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error creating directories: %v", err)
     }
     log.Println("Directories created successfully.")
 
     // Generate the .nuspec file and defer its removal after use.
     nuspecPath, err := generateNuspec(buildInfo, projectDir)
     if err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error generating .nuspec: %v", err)
     }
     defer os.Remove(nuspecPath)
     log.Printf(".nuspec generated at: %s", nuspecPath)
