@@ -78,68 +78,24 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
     return &buildInfo, nil
 }
 
-// parseVersion handles different version formats:
-// 1. Date-based versions: "YYYY.MM.DD"
-// 2. Semantic versions: "X.Y.Z" or "X.Y.Z.B"
+// parseVersion converts version strings to a normalized format.
 func parseVersion(versionStr string) (string, error) {
     parts := strings.Split(versionStr, ".")
-    
-    var major, minor, build int
-    var err error
+    var numericParts []string
 
-    switch len(parts) {
-    case 3: // Possible date-based version (e.g., "2024.10.12") or semantic version "X.Y.Z"
-        if len(parts[0]) == 4 { // Date-based version
-            major, err = strconv.Atoi(parts[0][2:]) // Take the last two digits of the year
-            if err != nil {
-                return "", fmt.Errorf("invalid year: %v", err)
-            }
-        } else { // Semantic version
-            major, err = strconv.Atoi(parts[0])
-            if err != nil {
-                return "", fmt.Errorf("invalid major version: %v", err)
-            }
+    // Convert all parts to strings to preserve the original input, ensuring they're valid numbers.
+    for _, part := range parts {
+        if _, err := strconv.Atoi(part); err != nil {
+            return "", fmt.Errorf("invalid version part: %q is not a number", part)
         }
-        minor, err = strconv.Atoi(parts[1])
-        if err != nil {
-            return "", fmt.Errorf("invalid minor version: %v", err)
-        }
-        build, err = strconv.Atoi(parts[2])
-        if err != nil {
-            return "", fmt.Errorf("invalid build version: %v", err)
-        }
-
-    case 4: // Semantic version with build number (e.g., "1.2.3.456")
-        major, err = strconv.Atoi(parts[0])
-        if err != nil {
-            return "", fmt.Errorf("invalid major version: %v", err)
-        }
-        minor, err = strconv.Atoi(parts[1])
-        if err != nil {
-            return "", fmt.Errorf("invalid minor version: %v", err)
-        }
-        build, err = strconv.Atoi(parts[2])
-        if err != nil {
-            return "", fmt.Errorf("invalid build version: %v", err)
-        }
-        extra, err := strconv.Atoi(parts[3])
-        if err != nil {
-            return "", fmt.Errorf("invalid extra build number: %v", err)
-        }
-        build = (build * 1000) + extra
-
-    default:
-        return "", fmt.Errorf("invalid version format: %s", versionStr)
+        numericParts = append(numericParts, part)
     }
 
-    // Ensure minor and build numbers fit within their ranges.
-    minor = minor % 256
-    build = build % 65536
-
-    return fmt.Sprintf("%d.%d.%d", major, minor, build), nil
+    // Join the parts back together to form the version string.
+    return strings.Join(numericParts, "."), nil
 }
 
-// Create required directories for the project
+// createProjectDirectory ensures necessary project directories exist.
 func createProjectDirectory(projectDir string) error {
     paths := []string{
         filepath.Join(projectDir, "payload"),
@@ -147,8 +103,9 @@ func createProjectDirectory(projectDir string) error {
         filepath.Join(projectDir, "build"),
     }
     for _, path := range paths {
-        if err := os.MkdirAll(path, os.ModePerm); err != nil {
-            return err
+        fullPath := filepath.Join(projectDir, path)
+        if err := os.MkdirAll(fullPath, os.ModePerm); err != nil {
+            return fmt.Errorf("failed to create directory %s: %w", fullPath, err)
         }
     }
     return nil
