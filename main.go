@@ -282,54 +282,72 @@ func checkSignTool() {
 
 // main is the entry point of the application.
 func main() {
-    var projectDir string
     var verbose bool
 
-    flag.StringVar(&projectDir, "project", ".", "Project directory")
+    // Ensure the project directory is provided as the first command-line argument.
+    if len(os.Args) < 2 {
+        log.Fatalf("Usage: %s <project_directory>", os.Args[0])
+    }
+    projectDir := os.Args[1]
+
+    // Parse any additional flags.
     flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
     flag.Parse()
-    log.Printf("Using project directory: %s", projectDir)
 
     setupLogging(verbose)
 
+    log.Printf("Using project directory: %s", projectDir)
+
+    // Verify the project structure exists and is valid.
+    if err := verifyProjectStructure(projectDir); err != nil {
+        log.Fatalf("Error: %v", err)
+    }
+    log.Println("Project structure verified. Proceeding with package creation...")
+
+    // Read build-info.yaml from the provided project directory.
     buildInfo, err := readBuildInfo(projectDir)
     if err != nil {
         log.Fatalf("Error: %v", err)
     }
 
-    // Validate post-install action
+    // Validate the post-install action.
     validActions := map[string]bool{"none": true, "logout": true, "restart": true}
     if !validActions[buildInfo.PostInstallAction] {
         log.Fatalf("Invalid post-install action: %s", buildInfo.PostInstallAction)
     }
 
+    // Handle the post-install script if necessary.
     if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
         log.Fatalf("Error: %v", err)
     }
 
+    // Create the required directories inside the project.
     if err := createProjectDirectory(projectDir); err != nil {
         log.Fatalf("Error: %v", err)
     }
-    log.Printf("Directories created successfully.")
-    
-    var nuspecPath string
-    if np, err := generateNuspec(buildInfo, projectDir); err != nil {
+    log.Println("Directories created successfully.")
+
+    // Generate the .nuspec file and defer its removal after use.
+    nuspecPath, err := generateNuspec(buildInfo, projectDir)
+    if err != nil {
         log.Fatalf("Error: %v", err)
-    } else {
-        nuspecPath = np
-        defer os.Remove(nuspecPath)
     }
+    defer os.Remove(nuspecPath)
     log.Printf(".nuspec generated at: %s", nuspecPath)
-    
+
+    // Ensure NuGet is available for packaging.
     checkNuGet()
 
+    // Set up paths for the build directory and final .nupkg output.
     buildDir := filepath.Join(projectDir, "build")
     nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+".nupkg")
 
+    // Run NuGet to pack the package.
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir); err != nil {
-        log.Fatalf("Error: %v", err)
+        log.Fatalf("Error creating package: %v", err)
     }
 
+    // Check if signing is required, and sign the package if a certificate is provided.
     if buildInfo.SigningCertificate != "" {
         checkSignTool()
         if err := signPackage(nupkgPath, buildInfo.SigningCertificate); err != nil {
