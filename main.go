@@ -230,10 +230,10 @@ func handlePostInstallScript(action, projectDir string) error {
 
 // generateNuspec creates a .nuspec file, resolving install locations flexibly.
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Fetch standard Windows directories (if applicable)
+    // Fetch standard Windows directories (if applicable).
     dirs := getStandardDirectories()
 
-    // Resolve the install location from the YAML, using standard directories if applicable.
+    // Resolve the install location from the YAML.
     resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
@@ -249,7 +249,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Add all files from the payload folder recursively.
+    // Add all files from the payload directory recursively.
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
         err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
@@ -257,10 +257,13 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
                 return err
             }
             if !info.IsDir() {
-                relPath, _ := filepath.Rel(projectDir, path)
+                relPath, err := filepath.Rel(projectDir, path)
+                if err != nil {
+                    return err
+                }
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
-                    Target: filepath.Join(resolvedLocation, relPath),
+                    Target: filepath.Join(resolvedLocation, filepath.Base(relPath)),
                 })
             }
             return nil
@@ -298,7 +301,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
 
-    // Start encoding the package structure.
+    // Encode the package structure.
     if err := encoder.Encode(nuspec); err != nil {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
