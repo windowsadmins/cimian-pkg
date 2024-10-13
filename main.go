@@ -249,7 +249,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Add all files from the payload directory recursively.
+    // Add all payload files recursively.
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
         err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
@@ -274,23 +274,10 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     }
 
     // Add preinstall and postinstall scripts if they exist.
-    preinstallPath := filepath.Join(projectDir, "scripts", "preinstall.ps1")
-    if _, err := os.Stat(preinstallPath); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    filepath.Join("scripts", "preinstall.ps1"),
-            Target: filepath.Join("tools", "chocolateyBeforeModify.ps1"),
-        })
-    }
+    addScriptIfExists(&nuspec, projectDir, "preinstall.ps1", "tools/chocolateyBeforeModify.ps1")
+    addScriptIfExists(&nuspec, projectDir, "postinstall.ps1", "tools/chocolateyInstall.ps1")
 
-    postinstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
-    if _, err := os.Stat(postinstallPath); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    filepath.Join("scripts", "postinstall.ps1"),
-            Target: filepath.Join("tools", "chocolateyInstall.ps1"),
-        })
-    }
-
-    // Open the .nuspec file for writing.
+    // Write the .nuspec file.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
@@ -307,6 +294,17 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     }
 
     return nuspecPath, nil
+}
+
+// addScriptIfExists checks if a script exists and adds it to the .nuspec files list.
+func addScriptIfExists(nuspec *Package, projectDir, scriptName, targetPath string) {
+    scriptPath := filepath.Join(projectDir, "scripts", scriptName)
+    if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    filepath.Join("scripts", scriptName),
+            Target: targetPath,
+        })
+    }
 }
 
 // runCommand executes shell commands with logging.
