@@ -151,7 +151,7 @@ func generateNuspec(buildInfo *BuildInfo) error {
     // Check if the payload directory exists and add it.
     payloadPath := "payload\\**"
     if _, err := os.Stat("payload"); err == nil {
-        files = append(files, FileRef{Src: payloadPath, Target: buildInfo.InstallPath})
+        files = append(files, FileRef{Src: payloadPath, Target: buildInfo.InstallLocation})
     } else {
         log.Println("No payload found. Skipping payload packaging.")
     }
