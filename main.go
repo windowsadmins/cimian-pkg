@@ -62,6 +62,40 @@ func NormalizePath(input string) string {
     return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
 }
 
+// getStandardDirectories returns a map of standard Windows directories with their identifiers.
+func getStandardDirectories() map[string]string {
+    homeDir, err := os.UserHomeDir()
+    if err != nil {
+        log.Fatalf("Failed to get user's home directory: %v", err)
+    }
+
+    return map[string]string{
+        "C:\\Program Files":                                "ProgramFilesFolder",
+        "C:\\Program Files (x86)":                          "ProgramFiles6432Folder",
+        "C:\\Program Files\\Common Files":                  "CommonFilesFolder",
+        "C:\\Program Files\\Common Files (x86)":            "CommonFiles6432Folder",
+        "C:\\ProgramData":                                  "CommonAppDataFolder",
+        "C:\\Windows":                                      "WindowsFolder",
+        "C:\\Windows\\System32":                            "SystemFolder",
+        "C:\\Windows\\SysWOW64":                            "System64Folder",
+        "C:\\Windows\\Fonts":                               "FontsFolder",
+        filepath.Join(homeDir, "AppData", "Local"):         "LocalAppDataFolder",
+        filepath.Join(homeDir, "AppData", "Roaming"):       "AppDataFolder",
+        filepath.Join(homeDir, "Desktop"):                  "DesktopFolder",
+        filepath.Join(homeDir, "Documents"):                "PersonalFolder",
+        filepath.Join(homeDir, "Favorites"):                "FavoritesFolder",
+        filepath.Join(homeDir, "My Pictures"):              "MyPicturesFolder",
+        filepath.Join(homeDir, "NetHood"):                  "NetHoodFolder",
+        filepath.Join(homeDir, "PrintHood"):                "PrintHoodFolder",
+        filepath.Join(homeDir, "Recent"):                   "RecentFolder",
+        filepath.Join(homeDir, "SendTo"):                   "SendToFolder",
+        filepath.Join(homeDir, "Start Menu"):               "StartMenuFolder",
+        filepath.Join(homeDir, "Startup"):                  "StartupFolder",
+        "C:\\Windows\\System":                              "System16Folder",
+        "C:\\Windows\\Temp":                                "TempFolder",
+        "C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local": "LocalAppDataFolder",
+    }
+}
 // readBuildInfo loads and parses build-info.yaml from the given directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
     data, err := os.ReadFile(filepath.Join(projectDir, "build-info.yaml"))
@@ -211,41 +245,6 @@ func runCommand(command string, args ...string) error {
     cmd.Stdout = os.Stdout
     cmd.Stderr = os.Stderr
     return cmd.Run()
-}
-
-// getStandardDirectories returns a map of standard Windows directories with their identifiers.
-func getStandardDirectories() map[string]string {
-    homeDir, err := os.UserHomeDir()
-    if err != nil {
-        log.Fatalf("Failed to get user's home directory: %v", err)
-    }
-
-    return map[string]string{
-        "C:\\Program Files":                                "ProgramFilesFolder",
-        "C:\\Program Files (x86)":                          "ProgramFiles6432Folder",
-        "C:\\Program Files\\Common Files":                  "CommonFilesFolder",
-        "C:\\Program Files\\Common Files (x86)":            "CommonFiles6432Folder",
-        "C:\\ProgramData":                                  "CommonAppDataFolder",
-        "C:\\Windows":                                      "WindowsFolder",
-        "C:\\Windows\\System32":                            "SystemFolder",
-        "C:\\Windows\\SysWOW64":                            "System64Folder",
-        "C:\\Windows\\Fonts":                               "FontsFolder",
-        filepath.Join(homeDir, "AppData", "Local"):         "LocalAppDataFolder",
-        filepath.Join(homeDir, "AppData", "Roaming"):       "AppDataFolder",
-        filepath.Join(homeDir, "Desktop"):                  "DesktopFolder",
-        filepath.Join(homeDir, "Documents"):                "PersonalFolder",
-        filepath.Join(homeDir, "Favorites"):                "FavoritesFolder",
-        filepath.Join(homeDir, "My Pictures"):              "MyPicturesFolder",
-        filepath.Join(homeDir, "NetHood"):                  "NetHoodFolder",
-        filepath.Join(homeDir, "PrintHood"):                "PrintHoodFolder",
-        filepath.Join(homeDir, "Recent"):                   "RecentFolder",
-        filepath.Join(homeDir, "SendTo"):                   "SendToFolder",
-        filepath.Join(homeDir, "Start Menu"):               "StartMenuFolder",
-        filepath.Join(homeDir, "Startup"):                  "StartupFolder",
-        "C:\\Windows\\System":                              "System16Folder",
-        "C:\\Windows\\Temp":                                "TempFolder",
-        "C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local": "LocalAppDataFolder",
-    }
 }
 
 // signPackage signs the .nupkg using SignTool.
