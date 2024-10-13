@@ -246,34 +246,6 @@ func getStandardDirectories() map[string]string {
     }
 }
 
-// Execute post-install actions based on user configuration
-func handlePostInstallAction(action string) {
-    var cmd *exec.Cmd
-
-    switch action {
-    case "logout":
-        log.Println("Logging out...")
-        cmd = exec.Command("shutdown", "/l")
-    case "restart":
-        log.Println("Restarting system...")
-        cmd = exec.Command("shutdown", "/r", "/t", "0")
-    case "none":
-        log.Println("No post-install action specified.")
-        return // No further action needed.
-    default:
-        log.Printf("Unknown post-install action: %s", action)
-        return // Exit if an unknown action is provided.
-    }
-
-    // Run the command and handle potential errors.
-    if err := cmd.Run(); err != nil {
-        log.Printf("Failed to execute %s action: %v", action, err)
-    } else {
-        log.Printf("%s action executed successfully.", action)
-    }
-}
-
-// Sign the package using SignTool if certificate is provided
 func signPackage(nupkgFile, certificate string) error {
     log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
     cmd := exec.Command(
