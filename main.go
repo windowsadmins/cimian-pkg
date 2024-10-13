@@ -249,25 +249,41 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Add files conditionally based on what is present.
-    if _, err := os.Stat(filepath.Join(projectDir, "payload")); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    filepath.Join("payload", "**"),
-            Target: resolvedLocation,
+    // Add all files from the payload folder recursively.
+    payloadPath := filepath.Join(projectDir, "payload")
+    if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
+        err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
+            if err != nil {
+                return err
+            }
+            if !info.IsDir() {
+                relPath, _ := filepath.Rel(projectDir, path)
+                nuspec.Files = append(nuspec.Files, FileRef{
+                    Src:    relPath,
+                    Target: filepath.Join(resolvedLocation, relPath),
+                })
+            }
+            return nil
         })
+        if err != nil {
+            return "", fmt.Errorf("error walking the payload directory: %w", err)
+        }
     }
 
-    if _, err := os.Stat(filepath.Join(projectDir, "scripts", "preinstall.ps1")); !os.IsNotExist(err) {
+    // Add preinstall and postinstall scripts if they exist.
+    preinstallPath := filepath.Join(projectDir, "scripts", "preinstall.ps1")
+    if _, err := os.Stat(preinstallPath); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
             Src:    filepath.Join("scripts", "preinstall.ps1"),
-            Target: "tools/chocolateyBeforeModify.ps1",
+            Target: filepath.Join("tools", "chocolateyBeforeModify.ps1"),
         })
     }
 
-    if _, err := os.Stat(filepath.Join(projectDir, "scripts", "postinstall.ps1")); !os.IsNotExist(err) {
+    postinstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
+    if _, err := os.Stat(postinstallPath); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
             Src:    filepath.Join("scripts", "postinstall.ps1"),
-            Target: "tools/chocolateyInstall.ps1",
+            Target: filepath.Join("tools", "chocolateyInstall.ps1"),
         })
     }
 
