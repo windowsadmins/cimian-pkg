@@ -144,6 +144,7 @@ func createProjectDirectory(projectDir string) error {
     paths := []string{
         filepath.Join(projectDir, "payload"),
         filepath.Join(projectDir, "scripts"),
+        filepath.Join(projectDir, "build"),
     }
     for _, path := range paths {
         if err := os.MkdirAll(path, os.ModePerm); err != nil {
@@ -153,39 +154,57 @@ func createProjectDirectory(projectDir string) error {
     return nil
 }
 
-// Generate the .nuspec file from build-info.yaml
-func generateNuspec(buildInfo *BuildInfo) error {
-    var files []FileRef
+// Creates or appends to postinstall.ps1 based on post-install action
+func handlePostInstallScript(action, projectDir string) error {
+    postInstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
+    var command string
 
-    // Check if the payload directory exists and add it.
-    payloadPath := "payload\\**"
-    if _, err := os.Stat("payload"); err == nil {
-        files = append(files, FileRef{Src: payloadPath, Target: buildInfo.InstallLocation})
-    } else {
-        log.Println("No payload found. Skipping payload packaging.")
+    // Determine the command to append based on action
+    switch action {
+    case "logout":
+        command = "shutdown /l\n"
+    case "restart":
+        command = "shutdown /r /t 0\n"
+    case "none":
+        log.Println("No post-install action required.")
+        return nil
+    default:
+        return fmt.Errorf("unknown post-install action: %s", action)
     }
 
-    // Check if preinstall.ps1 exists and map to tools/install.ps1.
-    if _, err := os.Stat("scripts/preinstall.ps1"); err == nil {
-        files = append(files, FileRef{
-            Src:    "scripts\\preinstall.ps1",
-            Target: "tools\\install.ps1",
-        })
+    // Check if postinstall.ps1 exists
+    var file *os.File
+    if _, err := os.Stat(postInstallPath); os.IsNotExist(err) {
+        log.Printf("Creating new postinstall.ps1: %s", postInstallPath)
+        if err := os.MkdirAll(filepath.Dir(postInstallPath), os.ModePerm); err != nil {
+            return fmt.Errorf("failed to create scripts directory: %v", err)
+        }
+        file, err = os.Create(postInstallPath)
+        if err != nil {
+            return fmt.Errorf("failed to create postinstall.ps1: %v", err)
+        }
     } else {
-        log.Println("No preinstall.ps1 script found.")
+        log.Printf("Appending to existing postinstall.ps1: %s", postInstallPath)
+        file, err = os.OpenFile(postInstallPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend)
+        if err != nil {
+            return fmt.Errorf("failed to open postinstall.ps1: %v", err)
+        }
+    }
+    defer file.Close()
+
+    // Write or append the command
+    if _, err := file.WriteString(command); err != nil {
+        return fmt.Errorf("failed to write to postinstall.ps1: %v", err)
     }
 
-    // Check if postinstall.ps1 exists and map to tools/chocolateyInstall.ps1.
-    if _, err := os.Stat("scripts/postinstall.ps1"); err == nil {
-        files = append(files, FileRef{
-            Src:    "scripts\\postinstall.ps1",
-            Target: "tools\\chocolateyInstall.ps1",
-        })
-    } else {
-        log.Println("No postinstall.ps1 script found.")
-    }
+    log.Printf("Post-install command added: %s", command)
+    return nil
+}
 
-    // Define the .nuspec metadata and package structure.
+// Generate the .nuspec file
+func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
+    nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
+
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -193,19 +212,25 @@ func generateNuspec(buildInfo *BuildInfo) error {
             Authors:     buildInfo.Product.Publisher,
             Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
         },
-        Files: files,
+        Files: []FileRef{
+            {Src: "payload/**", Target: buildInfo.InstallLocation},
+            {Src: "scripts/postinstall.ps1", Target: "tools/chocolateyInstall.ps1"},
+        },
     }
 
-    // Write the .nuspec file.
-    file, err := os.Create(buildInfo.Product.Name + ".nuspec")
+    file, err := os.Create(nuspecPath)
     if err != nil {
-        return err
+        return "", err
     }
     defer file.Close()
 
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
-    return encoder.Encode(nuspec)
+    if err := encoder.Encode(nuspec); err != nil {
+        return "", err
+    }
+
+    return nuspecPath, nil
 }
 
 // Run shell commands with logging
@@ -317,34 +342,31 @@ func main() {
         log.Fatalf("Failed to read build-info.yaml: %v", err)
     }
 
-    version, err := parseVersion(buildInfo.Product.Version)
+    if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
+        log.Fatalf("Failed to handle post-install script: %v", err)
+    }
+
+    nuspecPath, err := generateNuspec(buildInfo, projectDir)
     if err != nil {
-        log.Fatalf("Invalid version format: %v", err)
-    }
-    log.Printf("Version: %s", version)
-
-    if err := createProjectDirectory(projectDir); err != nil {
-        log.Fatalf("Failed to create directories: %v", err)
-    }
-
-    if err := generateNuspec(buildInfo); err != nil {
         log.Fatalf("Failed to generate .nuspec: %v", err)
     }
+    defer os.Remove(nuspecPath)
 
-    nupkgFile := buildInfo.Product.Name + ".nupkg"
-    if err := runCommand("nuget", "pack", buildInfo.Product.Name+".nuspec"); err != nil {
+    buildDir := filepath.Join(projectDir, "build")
+    if err := os.MkdirAll(buildDir, os.ModePerm); err != nil {
+        log.Fatalf("Failed to create build directory: %v", err)
+    }
+
+    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+".nupkg")
+    if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir); err != nil {
         log.Fatalf("Failed to create .nupkg: %v", err)
     }
 
     if buildInfo.SigningCertificate != "" {
-        if err := signPackage(nupkgFile, buildInfo.SigningCertificate); err != nil {
+        if err := runCommand("signtool", "sign", "/n", buildInfo.SigningCertificate, "/fd", "SHA256", "/tr", "http://timestamp.digicert.com", "/td", "SHA256", nupkgPath); err != nil {
             log.Fatalf("Failed to sign package: %v", err)
         }
-    } else {
-        log.Println("No identity provided. Skipping package signing.")
     }
 
-    handlePostInstallAction(buildInfo.PostInstallAction)
-
-    log.Println("Package created successfully.")
+    log.Printf("Package created successfully: %s", nupkgPath)
 }
