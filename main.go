@@ -492,7 +492,7 @@ func main() {
     buildDir := filepath.Join(projectDir, "build")
 
     // Set the path for the final .nupkg output using the product name and version
-    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name + "." + buildInfo.Product.Version + ".nupkg")
+    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+"-"+buildInfo.Product.Version+".nupkg")
 
     // Run NuGet to pack the package
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
