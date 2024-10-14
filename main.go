@@ -77,61 +77,13 @@ func verifyProjectStructure(projectDir string) error {
     if _, err := os.Stat(buildInfoPath); os.IsNotExist(err) {
         return fmt.Errorf("'build-info.yaml' file is missing in the project directory")
     }
+
     return nil
 }
 
 // NormalizePath ensures paths use consistent separators across platforms.
 func NormalizePath(input string) string {
     return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
-}
-
-// getStandardDirectories returns a map of standard Windows directories with their identifiers.
-func getStandardDirectories() map[string]string {
-    homeDir, err := os.UserHomeDir()
-    if err != nil {
-        log.Fatalf("Failed to get user's home directory: %v", err)
-    }
-
-    return map[string]string{
-        "C:\\Program Files":                                "ProgramFilesFolder",
-        "C:\\Program Files (x86)":                          "ProgramFiles6432Folder",
-        "C:\\Program Files\\Common Files":                  "CommonFilesFolder",
-        "C:\\Program Files\\Common Files (x86)":            "CommonFiles6432Folder",
-        "C:\\ProgramData":                                  "CommonAppDataFolder",
-        "C:\\Windows":                                      "WindowsFolder",
-        "C:\\Windows\\System32":                            "SystemFolder",
-        "C:\\Windows\\SysWOW64":                            "System64Folder",
-        "C:\\Windows\\Fonts":                               "FontsFolder",
-        filepath.Join(homeDir, "AppData", "Local"):         "LocalAppDataFolder",
-        filepath.Join(homeDir, "AppData", "Roaming"):       "AppDataFolder",
-        filepath.Join(homeDir, "Desktop"):                  "DesktopFolder",
-        filepath.Join(homeDir, "Documents"):                "PersonalFolder",
-        filepath.Join(homeDir, "Favorites"):                "FavoritesFolder",
-        filepath.Join(homeDir, "My Pictures"):              "MyPicturesFolder",
-        filepath.Join(homeDir, "NetHood"):                  "NetHoodFolder",
-        filepath.Join(homeDir, "PrintHood"):                "PrintHoodFolder",
-        filepath.Join(homeDir, "Recent"):                   "RecentFolder",
-        filepath.Join(homeDir, "SendTo"):                   "SendToFolder",
-        filepath.Join(homeDir, "Start Menu"):               "StartMenuFolder",
-        filepath.Join(homeDir, "Startup"):                  "StartupFolder",
-        "C:\\Windows\\System":                              "System16Folder",
-        "C:\\Windows\\Temp":                                "TempFolder",
-        "C:\\Windows\\System32\\config\\systemprofile\\AppData\\Local": "LocalAppDataFolder",
-    }
-}
-
-// resolveInstallLocation ensures the install location is valid, using standard directories if applicable.
-func resolveInstallLocation(installLocation string, dirs map[string]string) string {
-    normalized := NormalizePath(installLocation)
-
-    // Check if the path matches any of the standard Windows directories.
-    if identifier, exists := dirs[normalized]; exists {
-        log.Printf("Install location matched to: %s (%s)", normalized, identifier)
-        return identifier
-    }
-
-    log.Printf("Using custom install location: %s", normalized)
-    return normalized
 }
 
 // readBuildInfo loads and parses build-info.yaml from the given directory.
