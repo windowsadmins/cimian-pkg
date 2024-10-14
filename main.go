@@ -231,9 +231,9 @@ func handlePostInstallScript(action, projectDir string) error {
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Fetch standard Windows directories (if applicable)
     dirs := getStandardDirectories()
+    // Define the path for the .nuspec file in the project root
+    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
-    // Define the path for the .nuspec file
-    nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
     // Define the package metadata
     nuspec := Package{
