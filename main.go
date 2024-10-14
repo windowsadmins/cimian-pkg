@@ -282,6 +282,7 @@ func includePreinstallScript(projectDir string) error {
     }
     return nil
 }
+
 // handlePostInstallScript manages the postinstall.ps1 file.
 func handlePostInstallScript(action, projectDir string) error {
     postInstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
@@ -470,19 +471,18 @@ func checkSignTool() {
     }
 }
 
-// main is the entry point of the application.
 func main() {
     var verbose bool
-
-    // Ensure the project directory is provided as the first command-line argument.
-    if len(os.Args) < 2 {
-        log.Fatalf("Usage: %s <project_directory>", os.Args[0])
-    }
-    projectDir := NormalizePath(os.Args[1])
 
     // Parse any additional flags.
     flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
     flag.Parse()
+
+    // Ensure the project directory is provided as the first command-line argument.
+    if flag.NArg() < 1 {
+        log.Fatalf("Usage: %s <project_directory>", os.Args[0])
+    }
+    projectDir := NormalizePath(flag.Arg(0))
 
     setupLogging(verbose)
 
@@ -515,6 +515,7 @@ func main() {
     if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
         log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
     }
+
     // Generate the .nuspec file and defer its removal after use.
     nuspecPath, err := generateNuspec(buildInfo, projectDir)
     if err != nil {
@@ -526,14 +527,17 @@ func main() {
     // Ensure NuGet is available for packaging.
     checkNuGet()
 
-    // Set the path for the final .nupkg output using only the product name
-    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name + ".nupkg")
-    
+    // Set the build directory
+    buildDir := filepath.Join(projectDir, "build")
+
+    // Set the path for the final .nupkg output using the product name and version
+    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name + "." + buildInfo.Product.Version + ".nupkg")
+
     // Run NuGet to pack the package
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
         log.Fatalf("Error creating package: %v", err)
     }
-    
+
     // Log the successful package creation
     log.Printf("Package created successfully: %s", nupkgPath)
 
