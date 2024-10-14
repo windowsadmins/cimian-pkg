@@ -232,9 +232,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Fetch standard Windows directories (if applicable)
     dirs := getStandardDirectories()
 
-    // Resolve the install location from the YAML, using standard directories if applicable.
-    resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
-
+    // Define the path for the .nuspec file
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
     // Define the package metadata
@@ -273,7 +271,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "tools/chocolateyBeforeModify.ps1")
     addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "tools/chocolateyInstall.ps1")
 
-    // Write the nuspec file
+    // Write the .nuspec file
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
