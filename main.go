@@ -380,9 +380,10 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             }
             if !info.IsDir() {
                 relPath, _ := filepath.Rel(projectDir, path)
+                targetPath := strings.TrimPrefix(path, payloadPath + string(os.PathSeparator))
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
-                    Target: strings.TrimPrefix(path, payloadPath+string(os.PathSeparator)),
+                    Target: filepath.Join("payload", targetPath),
                 })
             }
             return nil
@@ -392,9 +393,20 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         }
     }
 
-    // Add scripts to nuspec with correct targets
-    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "chocolateyBeforeModify.ps1")
-    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "chocolateyInstall.ps1")
+    // Include the generated chocolateyInstall.ps1 script
+    nuspec.Files = append(nuspec.Files, FileRef{
+        Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
+        Target: filepath.Join("tools", "chocolateyInstall.ps1"),
+    })
+
+    // Include chocolateyBeforeModify.ps1 if it exists
+    preinstallScriptPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+    if _, err := os.Stat(preinstallScriptPath); err == nil {
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    filepath.Join("tools", "chocolateyBeforeModify.ps1"),
+            Target: filepath.Join("tools", "chocolateyBeforeModify.ps1"),
+        })
+    }
 
     // Write the .nuspec file
     file, err := os.Create(nuspecPath)
