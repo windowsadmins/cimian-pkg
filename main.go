@@ -285,13 +285,17 @@ func handlePostInstallScript(action, projectDir string) error {
 }
 
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Define the path for the .nuspec file in the project root
-    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name + ".nuspec")
-    // Use the description from YAML, or set it to an empty string if not present
+    // Define the path for the .nuspec file
+    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
+
+    // Generate a dynamic description if none is provided in YAML
     description := buildInfo.Product.Description
     if description == "" {
-        log.Println("No description provided in YAML, setting empty description in .nuspec")
-        description = ""
+        log.Println("No description provided in YAML, generating dynamic description for .nuspec")
+        description = fmt.Sprintf(
+            "%s version %s for %s by %s",
+            buildInfo.Product.Name, buildInfo.Product.Version, buildInfo.Product.Identifier, buildInfo.Product.Publisher,
+        )
     }
 
     // Define the package metadata
