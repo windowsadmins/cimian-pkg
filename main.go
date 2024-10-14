@@ -231,8 +231,6 @@ func handlePostInstallScript(action, projectDir string) error {
 }
 
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Fetch standard Windows directories (if applicable)
-    dirs := getStandardDirectories()
     // Define the path for the .nuspec file in the project root
     nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
@@ -289,7 +287,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
                 relPath, _ := filepath.Rel(projectDir, path)
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
-                    Target: filepath.Base(relPath),
+                    Target: strings.TrimPrefix(path, payloadPath+string(os.PathSeparator)),
                 })
             }
             return nil
