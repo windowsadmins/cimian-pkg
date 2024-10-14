@@ -60,19 +60,22 @@ func setupLogging(verbose bool) {
     }
 }
 
-// verifyProjectStructure checks that required files and folders exist.
+// verifyProjectStructure checks that either the payload or scripts folder exists.
 func verifyProjectStructure(projectDir string) error {
-    requiredPaths := []string{
-        "build-info.yaml",
-        "payload", // Payload folder must exist
-        "scripts", // Scripts folder must exist
+    payloadPath := filepath.Join(projectDir, "payload")
+    scriptsPath := filepath.Join(projectDir, "scripts")
+
+    // Check if at least one of the two required paths exists.
+    if _, err := os.Stat(payloadPath); os.IsNotExist(err) {
+        if _, err := os.Stat(scriptsPath); os.IsNotExist(err) {
+            return fmt.Errorf("either 'payload' or 'scripts' directory must exist in the project directory")
+        }
     }
 
-    for _, path := range requiredPaths {
-        fullPath := filepath.Join(projectDir, path)
-        if _, err := os.Stat(fullPath); os.IsNotExist(err) {
-            return fmt.Errorf("required path %s is missing", fullPath)
-        }
+    // Ensure the build-info.yaml file exists.
+    buildInfoPath := filepath.Join(projectDir, "build-info.yaml")
+    if _, err := os.Stat(buildInfoPath); os.IsNotExist(err) {
+        return fmt.Errorf("'build-info.yaml' file is missing in the project directory")
     }
     return nil
 }
