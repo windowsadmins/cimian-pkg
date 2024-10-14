@@ -488,26 +488,21 @@ func main() {
         log.Fatalf("Error reading build-info.yaml: %v", err)
     }
 
-    // If postinstall_action is present, handle it.
-    if buildInfo.PostInstallAction != "" {
-        validActions := map[string]bool{"none": true, "logout": true, "restart": true}
-        if !validActions[buildInfo.PostInstallAction] {
-            log.Fatalf("Invalid post-install action: %s", buildInfo.PostInstallAction)
-        }
-
-        if err := handlePostInstallScript(buildInfo.PostInstallAction, projectDir); err != nil {
-            log.Fatalf("Error handling post-install script: %v", err)
-        }
-    } else {
-        log.Println("No post-install action required.")
-    }
-
     // Create the required directories inside the project.
     if err := createProjectDirectory(projectDir); err != nil {
         log.Fatalf("Error creating directories: %v", err)
     }
     log.Println("Directories created successfully.")
 
+    // Include preinstall script if it exists
+    if err := includePreinstallScript(projectDir); err != nil {
+        log.Fatalf("Error including preinstall script: %v", err)
+    }
+
+    // Generate the chocolateyInstall.ps1 script
+    if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
+        log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
+    }
     // Generate the .nuspec file and defer its removal after use.
     nuspecPath, err := generateNuspec(buildInfo, projectDir)
     if err != nil {
