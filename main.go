@@ -184,6 +184,104 @@ func createProjectDirectory(projectDir string) error {
     return nil
 }
 
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+    input, err := os.ReadFile(src)
+    if err != nil {
+        return err
+    }
+    if err := os.WriteFile(dst, input, 0644); err != nil {
+        return err
+    }
+    return nil
+}
+
+// createChocolateyInstallScript generates the chocolateyInstall.ps1 script.
+func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) error {
+    scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
+    installLocation := buildInfo.InstallLocation
+
+    // Normalize the install location path
+    installLocation = normalizeInstallLocation(installLocation)
+
+    // Start building the script content
+    var scriptBuilder strings.Builder
+
+    // Write the initial script content
+    scriptBuilder.WriteString(`$ErrorActionPreference = 'Stop'
+
+$installLocation = '` + installLocation + `'
+
+# Ensure the install location exists
+New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+
+# Copy payload contents to the install location
+Copy-Item -Path "$PSScriptRoot\..\payload\*" -Destination $installLocation -Recurse -Force
+`)
+
+    // Append the contents of postinstall.ps1 if it exists
+    postInstallScriptPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
+    if _, err := os.Stat(postInstallScriptPath); err == nil {
+        scriptBuilder.WriteString("\n# Post-install script contents\n")
+        postInstallContent, err := os.ReadFile(postInstallScriptPath)
+        if err != nil {
+            return fmt.Errorf("failed to read postinstall.ps1: %w", err)
+        }
+        scriptBuilder.WriteString(string(postInstallContent))
+    }
+
+    // Append the postinstall_action if specified
+    switch strings.ToLower(buildInfo.PostInstallAction) {
+    case "logout":
+        scriptBuilder.WriteString("\n# Perform logout\n")
+        scriptBuilder.WriteString("shutdown /l\n")
+    case "restart":
+        scriptBuilder.WriteString("\n# Perform restart\n")
+        scriptBuilder.WriteString("shutdown /r /t 0\n")
+    case "", "none":
+        // Do nothing
+    default:
+        return fmt.Errorf("invalid postinstall_action: %s", buildInfo.PostInstallAction)
+    }
+
+    // Ensure the tools directory exists
+    if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
+        return fmt.Errorf("failed to create tools directory: %w", err)
+    }
+
+    // Write the script content to the file
+    if err := os.WriteFile(scriptPath, []byte(scriptBuilder.String()), 0644); err != nil {
+        return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
+    }
+    return nil
+}
+
+// normalizeInstallLocation ensures the install location path is properly formatted.
+func normalizeInstallLocation(path string) string {
+    // Replace forward slashes with backslashes
+    path = strings.ReplaceAll(path, "/", `\`)
+    // Remove any trailing backslashes
+    path = strings.TrimRight(path, `\`)
+    return path
+}
+
+// includePreinstallScript copies preinstall.ps1 to tools\chocolateyBeforeModify.ps1 if it exists.
+func includePreinstallScript(projectDir string) error {
+    preinstallSrcPath := filepath.Join(projectDir, "scripts", "preinstall.ps1")
+    preinstallDstPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+
+    if _, err := os.Stat(preinstallSrcPath); err == nil {
+        // Ensure the tools directory exists
+        if err := os.MkdirAll(filepath.Dir(preinstallDstPath), os.ModePerm); err != nil {
+            return fmt.Errorf("failed to create tools directory: %w", err)
+        }
+        // Copy the preinstall.ps1 to tools\chocolateyBeforeModify.ps1
+        if err := copyFile(preinstallSrcPath, preinstallDstPath); err != nil {
+            return fmt.Errorf("failed to copy preinstall.ps1 to chocolateyBeforeModify.ps1: %w", err)
+        }
+    }
+    return nil
+}
 // handlePostInstallScript manages the postinstall.ps1 file.
 func handlePostInstallScript(action, projectDir string) error {
     postInstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
