@@ -512,5 +512,13 @@ func main() {
         log.Println("No signing certificate provided. Skipping signing.")
     }
 
-    log.Printf("Package created successfully: %s", nupkgPath)
+    // Clean up the tools directory after packaging.
+    toolsDir := filepath.Join(projectDir, "tools")
+    if err := os.RemoveAll(toolsDir); err != nil {
+        log.Printf("Warning: Failed to remove tools directory: %v", err)
+    } else {
+        log.Println("Tools directory removed successfully.")
+    }
+
+    log.Printf("Package process completed successfully: %s", nupkgPath)
 }
