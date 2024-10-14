@@ -339,10 +339,9 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             }
             if !info.IsDir() {
                 relPath, _ := filepath.Rel(projectDir, path)
-                targetPath := strings.TrimPrefix(path, payloadPath + string(os.PathSeparator))
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
-                    Target: filepath.Join("payload", targetPath),
+                    Target: strings.TrimPrefix(path, payloadPath+string(os.PathSeparator)),
                 })
             }
             return nil
