@@ -232,13 +232,7 @@ func handlePostInstallScript(action, projectDir string) error {
 
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Define the path for the .nuspec file in the project root
-    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
-
-    // Prepare the description, ensuring it's not empty
-    description := buildInfo.Product.Description
-    if description == "" {
-        description = fmt.Sprintf("%s installer package.", buildInfo.Product.Name)
-    }
+    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name + ".nuspec")
 
     // Define the package metadata
     nuspec := Package{
@@ -246,7 +240,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
             Authors:     buildInfo.Product.Publisher,
-            Description: description,
+            Description: buildInfo.Product.Description,
             Tags:        "admin",
         },
     }
@@ -424,14 +418,16 @@ func main() {
     // Ensure NuGet is available for packaging.
     checkNuGet()
 
-    // Set up paths for the build directory and final .nupkg output.
-    buildDir := filepath.Join(projectDir, "build")
-    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+".nupkg")
-
-    // Run NuGet to pack the package.
+    // Set the path for the final .nupkg output using only the product name
+    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name + ".nupkg")
+    
+    // Run NuGet to pack the package
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
         log.Fatalf("Error creating package: %v", err)
     }
+    
+    // Log the successful package creation
+    log.Printf("Package created successfully: %s", nupkgPath)
 
     // Check if signing is required, and sign the package if a certificate is provided.
     if buildInfo.SigningCertificate != "" {
