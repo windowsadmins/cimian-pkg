@@ -228,14 +228,16 @@ func handlePostInstallScript(action, projectDir string) error {
     return nil
 }
 
-// generateNuspec creates a .nuspec file, resolving install locations flexibly.
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Fetch standard Windows directories (if applicable).
+    // Fetch standard Windows directories (if applicable)
     dirs := getStandardDirectories()
+
+    // Resolve the install location from the YAML, using standard directories if applicable.
+    resolvedLocation := resolveInstallLocation(buildInfo.InstallLocation, dirs)
 
     nuspecPath := filepath.Join(projectDir, "build", buildInfo.Product.Name+".nuspec")
 
-    // Define the package metadata.
+    // Define the package metadata
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -246,7 +248,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Add all payload files recursively.
+    // Collect all payload files and add them to the nuspec
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
         err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
@@ -254,10 +256,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
                 return err
             }
             if !info.IsDir() {
-                relPath, err := filepath.Rel(projectDir, path)
-                if err != nil {
-                    return err
-                }
+                relPath, _ := filepath.Rel(projectDir, path)
                 nuspec.Files = append(nuspec.Files, FileRef{
                     Src:    relPath,
                     Target: filepath.Base(relPath),
@@ -266,26 +265,23 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             return nil
         })
         if err != nil {
-            return "", fmt.Errorf("error walking the payload directory: %w", err)
+            return "", fmt.Errorf("failed to walk payload directory: %w", err)
         }
     }
 
-    // Add preinstall and postinstall scripts if they exist.
-    addScriptIfExists(&nuspec, projectDir, "preinstall.ps1", "tools/chocolateyBeforeModify.ps1")
-    addScriptIfExists(&nuspec, projectDir, "postinstall.ps1", "tools/chocolateyInstall.ps1")
+    // Check for and add pre-install and post-install scripts if present
+    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "tools/chocolateyBeforeModify.ps1")
+    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "tools/chocolateyInstall.ps1")
 
-    // Write the .nuspec file.
+    // Write the nuspec file
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
     }
     defer file.Close()
 
-    // Create an XML encoder and format the output.
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
-
-    // Encode the package structure.
     if err := encoder.Encode(nuspec); err != nil {
         return "", fmt.Errorf("failed to encode .nuspec: %w", err)
     }
@@ -293,13 +289,13 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     return nuspecPath, nil
 }
 
-// addScriptIfExists checks if a script exists and adds it to the .nuspec files list.
-func addScriptIfExists(nuspec *Package, projectDir, scriptName, targetPath string) {
+// Helper function to add scripts to the nuspec if they exist
+func addScriptToNuspec(nuspec *Package, projectDir, scriptName, target string) {
     scriptPath := filepath.Join(projectDir, "scripts", scriptName)
     if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
             Src:    filepath.Join("scripts", scriptName),
-            Target: targetPath,
+            Target: target,
         })
     }
 }
