@@ -297,9 +297,9 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         }
     }
 
-    // Check for and add pre-install and post-install scripts if present
-    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "tools/chocolateyBeforeModify.ps1")
-    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "tools/chocolateyInstall.ps1")
+    // Add scripts to nuspec with correct targets
+    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "chocolateyBeforeModify.ps1")
+    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "chocolateyInstall.ps1")
 
     // Write the .nuspec file
     file, err := os.Create(nuspecPath)
@@ -323,7 +323,7 @@ func addScriptToNuspec(nuspec *Package, projectDir, scriptName, target string) {
     if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
         nuspec.Files = append(nuspec.Files, FileRef{
             Src:    filepath.Join("scripts", scriptName),
-            Target: target,
+            Target: filepath.Join("tools", target),
         })
     }
 }
@@ -429,7 +429,7 @@ func main() {
     nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+".nupkg")
 
     // Run NuGet to pack the package.
-    if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir); err != nil {
+    if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
         log.Fatalf("Error creating package: %v", err)
     }
 
