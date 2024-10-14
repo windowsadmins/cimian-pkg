@@ -287,6 +287,12 @@ func handlePostInstallScript(action, projectDir string) error {
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Define the path for the .nuspec file in the project root
     nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name + ".nuspec")
+    // Use the description from YAML, or set it to an empty string if not present
+    description := buildInfo.Product.Description
+    if description == "" {
+        log.Println("No description provided in YAML, setting empty description in .nuspec")
+        description = ""
+    }
 
     // Define the package metadata
     nuspec := Package{
@@ -294,7 +300,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
             Authors:     buildInfo.Product.Publisher,
-            Description: buildInfo.Product.Description,
+            Description: description,
             Tags:        "admin",
         },
     }
