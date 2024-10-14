@@ -19,10 +19,11 @@ type BuildInfo struct {
     PostInstallAction  string `yaml:"postinstall_action"`
     SigningCertificate string `yaml:"signing_certificate,omitempty"`
     Product            struct {
-        Identifier string `yaml:"identifier"`
-        Version    string `yaml:"version"`
-        Name       string `yaml:"name"`
-        Publisher  string `yaml:"publisher"`
+        Identifier  string `yaml:"identifier"`
+        Version     string `yaml:"version"`
+        Name        string `yaml:"name"`
+        Publisher   string `yaml:"publisher"`
+        Description string `yaml:"description,omitempty"`
     } `yaml:"product"`
 }
 
@@ -40,6 +41,7 @@ type Metadata struct {
     Authors     string `xml:"authors"`
     Description string `xml:"description"`
     Tags        string `xml:"tags,omitempty"`
+    Readme      string `xml:"readme,omitempty"`
 }
 
 // FileRef defines the source and target paths for files.
@@ -234,6 +236,11 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     // Define the path for the .nuspec file in the project root
     nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
+    // Prepare the description, ensuring it's not empty
+    description := buildInfo.Product.Description
+    if description == "" {
+        description = fmt.Sprintf("%s installer package.", buildInfo.Product.Name)
+    }
 
     // Define the package metadata
     nuspec := Package{
@@ -241,9 +248,34 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
             Authors:     buildInfo.Product.Publisher,
-            Description: fmt.Sprintf("%s installer package.", buildInfo.Product.Name),
+            Description: description,
             Tags:        "admin",
         },
+    }
+
+    // Conditionally include the readme if description is provided
+    if buildInfo.Product.Description != "" {
+        // Create the readme file
+        readmePath := filepath.Join(projectDir, "readme.md")
+        readmeContent := buildInfo.Product.Description
+
+        if err := os.WriteFile(readmePath, []byte(readmeContent), 0644); err != nil {
+            return "", fmt.Errorf("failed to write readme.md: %w", err)
+        }
+        defer func() {
+            if err := os.Remove(readmePath); err != nil {
+                log.Printf("Warning: Failed to remove temporary readme.md file: %v", err)
+            }
+        }()
+
+        // Include the readme in the nuspec metadata
+        nuspec.Metadata.Readme = "readme.md"
+
+        // Include the readme file in the package files
+        nuspec.Files = append(nuspec.Files, FileRef{
+            Src:    "readme.md",
+            Target: "readme.md",
+        })
     }
 
     // Collect all payload files and add them to the nuspec
