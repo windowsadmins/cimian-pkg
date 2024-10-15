@@ -1,10 +1,8 @@
-# gorillapkg
+## gorillapkg
 
-## Introduction
+`gorillapkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Gorilla**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
 
-`gorillapkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Gorilla**) for deployment, with support for **pre- and post-installation scripts**.
-
-This tool simplifies the complexities of deployment by abstracting YAML-based configuration and script-based actions, and offers flexible **certificate signing** using Windows `SignTool`.
+This tool simplifies the complexities of deployment by abstracting YAML-based configuration and script-based actions and offers **flexible certificate signing** using Windows `SignTool`.
 
 ### Features
 
@@ -12,24 +10,21 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 - **Script Support**: Supports **pre-install** and **post-install** scripts executed with **elevated privileges**.
 - **Custom Installation Paths**: Configure where the payload files are installed via the YAML configuration.
 - **Post-Install Actions**: Supports automatic **logout** or **restart** after package installation.
-- **Package Signing with `SignTool`**: Optionally sign packages using a certificate in the Windows Certificate Store.
-- **Automated Packaging**: Uses `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Gorilla**.
+- **Package Signing with `SignTool`**: Allows seamless signing of `.nupkg` packages using a `.pfx` certificate or certificate store.
+- **Smart Readme Inclusion**: Automatically creates and includes a `readme.md` if a description is provided in `build-info.yaml`.
+- **Automated Packaging**: Uses the `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Gorilla**.
 - **YAML-Driven Configuration**: All metadata and installation instructions come from the `build-info.yaml` file.
-
----
 
 ### Prerequisites
 
-#### **For Development:**
+#### For Development:
 - **Go** (to build the `gorillapkg` tool).
 - **NuGet CLI** (for generating `.nupkg` packages).
 
-#### **For Deployment:**
+#### For Deployment:
 - **Chocolatey** or **Gorilla** (for installing `.nupkg` packages).
 - **PowerShell** (to run pre- and post-installation scripts).
 - **Windows SDK** (for the `SignTool` utility).
-
----
 
 ### Installation
 
@@ -39,8 +34,6 @@ Clone the repository:
 git clone https://github.com/rodchristiansen/gorilla-pkg.git
 cd gorilla-pkg
 ```
-
----
 
 ### Folder Structure for Packages
 
@@ -58,48 +51,51 @@ project/
 
 The `build-info.yaml` file contains configuration settings for the package:
 
-Here’s the structured YAML and the detailed explainer added as a separate section:
-
 ```yaml
 product:
-  identifier: "com.gorillacorp.gorilla"
-  version: "1.0.0"
   name: "Gorilla"
+  version: "2024.10.11"
+  identifier: "com.gorillacorp.gorilla"
   publisher: "Gorilla Corp"
-install_location: "C:\\Program Files\\Gorilla"
-postinstall_action: "restart"
+  description: "This is the StartSet installer package."
+install_location: "C:\Program Files\Gorilla"
+postinstall_action: "none"
 signing_certificate: "Gorilla Corp EV Certificate"
 ```
 
-### **Field Descriptions**
+Here’s the **Field Descriptions** section updated with the `description` field information directly included.
 
-- **`identifier`:**  
-  A reverse-domain style unique identifier (e.g., `com.gorillacorp.gorilla`). This identifier aligns with NuGet's `<id>` field and ensures that the package is recognized correctly across versions, preventing duplicate or conflicting installs.
+#### Field Descriptions
 
-- **`version`:**  
-  The version of the package. It supports both:
-  - **Semantic versioning:** e.g., `1.0.0`  
-  - **Date-based versioning:** e.g., `2024.10.12`  
-  This allows the system to compare versions during upgrades and determine if a new installation is required.
+- **`identifier`**:  
+  A unique identifier in reverse-domain style (e.g., `com.gorillacorp.gorilla`). This ensures the package is correctly recognized by the system and prevents naming conflicts.
 
-- **`name`:**  
-  A friendly display name for the product, shown during installation or in the system’s package manager.
+- **`version`**:  
+  Supports **semantic versioning** (e.g., `1.0.0`) or **date-based versioning** (e.g., `2024.10.11`). Used to determine whether a new installation or update is required during deployments.
 
-- **`publisher`:**  
-  Refers to the organization or company that distributes the package, ensuring users know the source of the software.
+- **`name`**:  
+  The display name of the product. This name will be visible during installation and in package managers like Chocolatey.
 
-- **`install_location`:**  
-  The default directory where the package will be installed (e.g., `C:\Program Files\Gorilla`). This can be adjusted if needed during each build.
+- **`publisher`**:  
+  The organization or individual distributing the package. This helps users identify the source of the software and improves trust.
 
-- **`postinstall_action`:**  
-  Specifies the action to be taken after installation. Options include:
-  - `none`: No additional action is taken.
-  - `logout`: Logs out the current user.
-  - `restart`: Restarts the system immediately.
+- **`description`**:  
+  A brief description of the package's purpose or functionality. If provided, it will:
+  - Be included in the `.nuspec` metadata.
+  - Automatically generate a `readme.md` file to be packaged with the `.nupkg` for documentation purposes.
+  - If the description is **absent**, no `readme.md` will be generated, and the process will proceed without errors or warnings.
 
-- **`signing_certificate`:**  
-  The name of the certificate to be used for signing the package using `SignTool`. Digital signing ensures the authenticity and integrity of the package, making it trusted by Windows.
+- **`install_location`**:  
+  The default directory where the software will be installed. This can be customized for each deployment.
 
+- **`postinstall_action`**:  
+  Specifies an optional action to take after installation:
+  - `none`: No further action is taken after installation.
+  - `logout`: Logs out the current user after installation completes.
+  - `restart`: Restarts the system immediately after installation.
+
+- **`signing_certificate`**:  
+  Path to the `.pfx` certificate containing both the public and private keys, or the **name of a certificate** in the local certificate store. This certificate is used for **code signing** to ensure the package's authenticity and integrity.
 
 ### Usage
 
@@ -112,110 +108,77 @@ gorillapkg <project_dir>
 This command will:
 1. Validate the project structure.
 2. Convert `build-info.yaml` into a `.nuspec` manifest.
-3. Run the `nuget pack` command to generate the `.nupkg` package.
-4. Optionally sign the package if `identity` is specified in the YAML file.
-5. Perform any specified post-install action (logout or restart).
-
----
+3. Run `nuget pack` to generate the `.nupkg`.
+4. Optionally sign the package using the specified certificate.
+5. Execute the specified post-install action (logout or restart).
 
 ### Script Execution
 
-- **Pre-Install**: `scripts/preinstall.ps1` runs before copying files to the target directory.
-- **Post-Install**: `scripts/postinstall.ps1` runs after installation and acts as Chocolatey’s `chocolateyInstall.ps1`.
-- Scripts can handle tasks like **service setup**, **configuration**, or **clean-up**.
+- **Pre-Install**:  
+  `scripts/preinstall.ps1` runs **before** copying files.
 
----
+- **Post-Install**:  
+  `scripts/postinstall.ps1` runs **after** installation (acts like Chocolatey’s `chocolateyInstall.ps1`).
 
 ### Package Signing with `SignTool`
 
-`gorillapkg` supports signing `.nupkg` packages using the **Windows `SignTool`** if the `identity` key is specified in the YAML configuration.
+If a signing certificate is provided, `gorillapkg` will sign the package using Windows `SignTool`.
 
-#### **Setup Instructions for `SignTool`:**
+#### Using a .pfx Certificate
 
-1. **Install the Windows SDK**:  
-   Download and install the SDK from [Microsoft](https://developer.microsoft.com/en-us/windows/downloads/windows-10-sdk/).
+```shell
+signtool sign /f "path\to\certificate.pfx" /p <password> /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "path\to\package.nupkg"
+```
 
-2. **Add `SignTool` to Your PATH**:
-   Add the path to `SignTool.exe` to your system’s PATH:
-   - `C:\Program Files (x86)\Windows Kits\10\bin\<version>\x64\signtool.exe`
+#### Using the Certificate Store
 
-3. **Ensure Certificate Availability**:
-   The certificate specified by the `identity` key must be installed in the **Personal Certificate Store**:
-   - Open **Certificate Manager**: `certmgr.msc`
-   - Navigate to **Personal → Certificates**.
-   - Ensure your certificate is listed there.
+```shell
+signtool sign /n "Gorilla Corp EV Certificate" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "path\to\package.nupkg"
+```
 
-4. **Test `SignTool` Setup**:
-   Run the following command to confirm `SignTool` is correctly installed:
+### Smart Readme Inclusion
 
-   ```shell
-   signtool
-   ```
-
----
+- If the **`description`** field is provided in `build-info.yaml`, a `readme.md` will be generated and included in the package.
+- If the description is **not** provided, the tool will skip the readme without errors.
 
 ### Example Commands
 
-1. **Build the `.nupkg`**:
+#### Building the `.nupkg`
 
-   ```shell
-   nuget pack gorilla.nuspec
-   ```
+```shell
+.\gorillapkg.exe C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet
+```
 
-2. **Install with Chocolatey**:
+#### Installing with Chocolatey
 
-   ```shell
-   choco install Gorilla --source="path/to/package"
-   ```
-
-3. **Install with Gorilla**:
-
-   ```shell
-   gorilla install Gorilla --source="path/to/package"
-   ```
-
----
+```shell
+choco install StartSet --source="C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet\build"
+```
 
 ### Handling Post-Install Actions
 
-The `postinstall_action` key in the YAML file allows for **system-level actions** post installation:
-- **`none`**: No action is performed.
-- **`logout`**: The current user is logged out.
-- **`restart`**: The system restarts immediately.
-
-The actions are executed using PowerShell commands during installation.
-
----
+The `postinstall_action` key in `build-info.yaml` triggers system actions:
+- **`none`**: No action.
+- **`logout`**: Logs out the user.
+- **`restart`**: Restarts the system immediately.
 
 ### Example Output
 
-When `gorillapkg` runs, it will:
-- Validate the project and generate a `.nuspec` manifest.
-- Build the `.nupkg` package.
-- Use `SignTool` to sign the package (if identity is provided).
-- Trigger post-install actions (logout or restart, if specified).
-
-Example output:
-
 ```
-Parsed version: 1.0.0
-Building package: Gorilla
-Running command: nuget pack Gorilla.nuspec
-Signing package: Gorilla.nupkg with identity: Gorilla Corp EV Certificate
-Package signed successfully.
+2024/10/14 13:00:00 main.go:350: Using project directory: C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet
+2024/10/14 13:00:00 main.go:356: Project structure verified. Proceeding with package creation...
+2024/10/14 13:00:00 main.go:394: Package successfully created: StartSet.nupkg
+2024/10/14 13:00:02 main.go:446: Package signed successfully: StartSet.nupkg
 Executing post-install action: restart
 Restarting system...
 ```
 
----
-
 ### Summary
 
-`gorillapkg` simplifies the creation and deployment of `.nupkg` packages while offering:
-- **Version control and metadata management** through YAML.
-- **Pre- and post-installation scripting** for advanced customization.
-- **Seamless certificate signing** with `SignTool`.
-- **Automatic logout or restart actions** after installation.
+`gorillapkg` streamlines the creation and deployment of `.nupkg` packages by:
+- Automating **version control** and **metadata management** through YAML.
+- Supporting **pre-install and post-install scripts**.
+- Providing seamless **package signing** with `SignTool`.
+- Offering **smart readme inclusion** based on the presence of a description.
 
-This tool eliminates the complexity of MSI and WiX, providing a streamlined solution for software deployment on Windows.
-
+This tool replaces complex MSI or WiX packaging with a simple, effective solution for Windows software deployment.
