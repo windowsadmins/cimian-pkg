@@ -151,15 +151,11 @@ func copyFile(src, dst string) error {
 // createChocolateyInstallScript generates the chocolateyInstall.ps1 script.
 func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) error {
     scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
-    installLocation := buildInfo.InstallLocation
+    installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
 
-    // Normalize the install location path
-    installLocation = normalizeInstallLocation(installLocation)
-
-    // Start building the script content
     var scriptBuilder strings.Builder
 
-    // Write the initial script content
+    // Write initial script content
     scriptBuilder.WriteString(`$ErrorActionPreference = 'Stop'
 
 $installLocation = '` + installLocation + `'
@@ -167,11 +163,18 @@ $installLocation = '` + installLocation + `'
 # Ensure the install location exists
 New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
 
-# Copy payload contents to the install location
-Copy-Item -Path "$PSScriptRoot\..\payload\*" -Destination $installLocation -Recurse -Force
+# Copy the contents of the payload folder to the install location
+Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
+    $targetPath = Join-Path $installLocation $_.FullName.Substring($_.FullName.IndexOf('payload') + 8)
+    if ($_.PSIsContainer) {
+        New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+    } else {
+        Copy-Item -Path $_.FullName -Destination $targetPath -Force
+    }
+}
 `)
 
-    // Append the contents of postinstall.ps1 if it exists
+    // Append postinstall script content if it exists
     postInstallScriptPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
     if _, err := os.Stat(postInstallScriptPath); err == nil {
         scriptBuilder.WriteString("\n# Post-install script contents\n")
@@ -182,16 +185,14 @@ Copy-Item -Path "$PSScriptRoot\..\payload\*" -Destination $installLocation -Recu
         scriptBuilder.WriteString(string(postInstallContent))
     }
 
-    // Append the postinstall_action if specified
+    // Append postinstall_action logic
     switch strings.ToLower(buildInfo.PostInstallAction) {
     case "logout":
-        scriptBuilder.WriteString("\n# Perform logout\n")
-        scriptBuilder.WriteString("shutdown /l\n")
+        scriptBuilder.WriteString("\n# Perform logout\nshutdown /l\n")
     case "restart":
-        scriptBuilder.WriteString("\n# Perform restart\n")
-        scriptBuilder.WriteString("shutdown /r /t 0\n")
+        scriptBuilder.WriteString("\n# Perform restart\nshutdown /r /t 0\n")
     case "", "none":
-        // Do nothing
+        // No action needed
     default:
         return fmt.Errorf("invalid postinstall_action: %s", buildInfo.PostInstallAction)
     }
@@ -201,7 +202,7 @@ Copy-Item -Path "$PSScriptRoot\..\payload\*" -Destination $installLocation -Recu
         return fmt.Errorf("failed to create tools directory: %w", err)
     }
 
-    // Write the script content to the file
+    // Write the generated script to tools\chocolateyInstall.ps1
     if err := os.WriteFile(scriptPath, []byte(scriptBuilder.String()), 0644); err != nil {
         return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
     }
