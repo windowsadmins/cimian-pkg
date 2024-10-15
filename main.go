@@ -285,58 +285,37 @@ func handlePostInstallScript(action, projectDir string) error {
 }
 
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    // Define the path for the .nuspec file
-    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
+    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name + ".nuspec")
 
-    // Generate a dynamic description if none is provided in YAML
-    description := buildInfo.Product.Description
-    if description == "" {
-        log.Println("No description provided in YAML, generating dynamic description for .nuspec")
-        description = fmt.Sprintf(
-            "%s version %s for %s by %s",
-            buildInfo.Product.Name, buildInfo.Product.Version, buildInfo.Product.Identifier, buildInfo.Product.Publisher,
-        )
-    }
-
-    // Define the package metadata
+    // Define the metadata for the package.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
             Authors:     buildInfo.Product.Publisher,
-            Description: description,
-            Tags:        "admin",
+            Description: buildInfo.Product.Description,
         },
     }
 
-    // Collect all payload files and add them to the nuspec
+    // Collect files from the payload folder and add to .nuspec
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
-        err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
+        filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
             if err != nil {
                 return err
             }
             if !info.IsDir() {
-                relPath, _ := filepath.Rel(projectDir, path)
+                relPath, _ := filepath.Rel(payloadPath, path) // Use relative path inside payload
                 nuspec.Files = append(nuspec.Files, FileRef{
-                    Src:    relPath,
-                    Target: strings.TrimPrefix(path, payloadPath+string(os.PathSeparator)),
+                    Src:    path,
+                    Target: relPath, // Ensure the payload folder itself is not included in the target path
                 })
             }
             return nil
         })
-        if err != nil {
-            return "", fmt.Errorf("failed to walk payload directory: %w", err)
-        }
     }
 
-    // Include the generated chocolateyInstall.ps1 script
-    nuspec.Files = append(nuspec.Files, FileRef{
-        Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
-        Target: filepath.Join("tools", "chocolateyInstall.ps1"),
-    })
-
-    // Write the .nuspec file
+    // Write the .nuspec file.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
