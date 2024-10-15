@@ -285,15 +285,27 @@ func handlePostInstallScript(action, projectDir string) error {
 }
 
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name + ".nuspec")
+    // Define the path for the .nuspec file
+    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
-    // Define the metadata for the package.
+    // Generate a dynamic description if none is provided in YAML
+    description := buildInfo.Product.Description
+    if description == "" {
+        log.Println("No description provided in YAML, generating dynamic description for .nuspec")
+        description = fmt.Sprintf(
+            "%s version %s for %s by %s",
+            buildInfo.Product.Name, buildInfo.Product.Version, buildInfo.Product.Identifier, buildInfo.Product.Publisher,
+        )
+    }
+
+    // Define the package metadata
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
             Authors:     buildInfo.Product.Publisher,
-            Description: buildInfo.Product.Description,
+            Description: description,
+            Tags:        "admin",
         },
     }
 
@@ -316,6 +328,13 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     }
 
     // Write the .nuspec file.
+    // Include the generated chocolateyInstall.ps1 script
+    nuspec.Files = append(nuspec.Files, FileRef{
+        Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
+        Target: filepath.Join("tools", "chocolateyInstall.ps1"),
+    })
+
+    // Write the .nuspec file
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
