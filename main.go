@@ -160,43 +160,36 @@ func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) erro
 
 $installLocation = '%s'
 
-# Ensure the install location exists (if defined)
-if ($installLocation -and $installLocation -ne '') {
-    try {
-        New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
-        Write-Host "Created or verified install location: $installLocation"
-    } catch {
-        Write-Error "Failed to create or access: $installLocation"
-        exit 1
-    }
-} else {
-    Write-Host "No install location specified, skipping creation of directories."
+# Ensure the install location exists
+try {
+    New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+    Write-Host "Created or verified install location: $installLocation"
+} catch {
+    Write-Error "Failed to create or access: $installLocation"
+    exit 1
 }
 
 # Copy files from the payload folder to the install location (if payload exists)
 $payloadPath = "$PSScriptRoot\..\payload"
-if (Test-Path $payloadPath) {
-    Write-Host "Payload path: $payloadPath"
-    Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
-        $relativePath = $_.FullName.Substring($payloadPath.Length).TrimStart('\')
-        $destinationPath = Join-Path $installLocation $relativePath
+Write-Host "Payload path: $payloadPath"
 
-        if ($_.PSIsContainer) {
-            New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-            Write-Host "Created directory: $destinationPath"
-        } else {
-            Copy-Item -Path $_.FullName -Destination $destinationPath -Force
-            Write-Host "Copied: $_.FullName -> $destinationPath"
+Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
+    $relativePath = $_.FullName.Substring($payloadPath.Length).TrimStart('\')
+    $destinationPath = Join-Path $installLocation $relativePath
 
-            # Validate if the file was copied successfully
-            if (-not (Test-Path -Path $destinationPath)) {
-                Write-Error "Failed to copy: $_.FullName"
-                exit 1
-            }
+        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+        Write-Host "Created directory: $destinationPath"
+    } else {
+        # Ensure the original filename is preserved during the copy
+        Copy-Item -Path $_.FullName -Destination $destinationPath -Force
+        Write-Host "Copied: $_.FullName -> $destinationPath"
+
+        # Validate if the file was copied successfully
+        if (-not (Test-Path -Path $destinationPath)) {
+            Write-Error "Failed to copy: $_.FullName"
+            exit 1
         }
     }
-} else {
-    Write-Host "No payload folder found. Proceeding with script-only installation."
 }
 `, installLocation))
 
