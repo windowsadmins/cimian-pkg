@@ -309,31 +309,6 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Conditionally include the readme if description is provided
-    if buildInfo.Product.Description != "" {
-        // Create the readme file
-        readmePath := filepath.Join(projectDir, "readme.md")
-        readmeContent := buildInfo.Product.Description
-
-        if err := os.WriteFile(readmePath, []byte(readmeContent), 0644); err != nil {
-            return "", fmt.Errorf("failed to write readme.md: %w", err)
-        }
-        defer func() {
-            if err := os.Remove(readmePath); err != nil {
-                log.Printf("Warning: Failed to remove temporary readme.md file: %v", err)
-            }
-        }()
-
-        // Include the readme in the nuspec metadata
-        nuspec.Metadata.Readme = "readme.md"
-
-        // Include the readme file in the package files
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    "readme.md",
-            Target: "readme.md",
-        })
-    }
-
     // Collect all payload files and add them to the nuspec
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
@@ -360,15 +335,6 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
         Target: filepath.Join("tools", "chocolateyInstall.ps1"),
     })
-
-    // Include chocolateyBeforeModify.ps1 if it exists
-    preinstallScriptPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
-    if _, err := os.Stat(preinstallScriptPath); err == nil {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    filepath.Join("tools", "chocolateyBeforeModify.ps1"),
-            Target: filepath.Join("tools", "chocolateyBeforeModify.ps1"),
-        })
-    }
 
     // Write the .nuspec file
     file, err := os.Create(nuspecPath)
