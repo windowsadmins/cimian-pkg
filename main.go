@@ -160,36 +160,47 @@ func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) erro
 
 $installLocation = '%s'
 
-# Ensure the install location exists
-try {
-    New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
-    Write-Host "Created or verified install location: $installLocation"
-} catch {
-    Write-Error "Failed to create or access: $installLocation"
-    exit 1
+# Ensure the install location exists (if defined)
+if ($installLocation -and $installLocation -ne '') {
+    try {
+        New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+        Write-Host "Created or verified install location: $installLocation"
+    } catch {
+        Write-Error "Failed to create or access: $installLocation"
+        exit 1
+    }
+} else {
+    Write-Host "No install location specified, skipping creation of directories."
 }
 
 # Copy files from the payload folder to the install location (if payload exists)
 $payloadPath = "$PSScriptRoot\..\payload"
-Write-Host "Payload path: $payloadPath"
+$payloadPath = [System.IO.Path]::GetFullPath($payloadPath)
+$payloadPath = $payloadPath.TrimEnd('\', '/')
+if (Test-Path $payloadPath) {
+    Write-Host "Payload path: $payloadPath"
+    Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
+        $fullName = $_.FullName
+        $relativePath = $fullName.Substring($payloadPath.Length)
+        $relativePath = $relativePath.TrimStart('\', '/')
+        $destinationPath = Join-Path $installLocation $relativePath
 
-Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
-    $relativePath = $_.FullName.Substring($payloadPath.Length).TrimStart('\')
-    $destinationPath = Join-Path $installLocation $relativePath
+        if ($_.PSIsContainer) {
+            New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+            Write-Host "Created directory: $destinationPath"
+        } else {
+            Copy-Item -Path $fullName -Destination $destinationPath -Force
+            Write-Host "Copied: $($fullName) -> $destinationPath"
 
-        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-        Write-Host "Created directory: $destinationPath"
-    } else {
-        # Ensure the original filename is preserved during the copy
-        Copy-Item -Path $_.FullName -Destination $destinationPath -Force
-        Write-Host "Copied: $_.FullName -> $destinationPath"
-
-        # Validate if the file was copied successfully
-        if (-not (Test-Path -Path $destinationPath)) {
-            Write-Error "Failed to copy: $_.FullName"
-            exit 1
+            # Validate if the file was copied successfully
+            if (-not (Test-Path -Path $destinationPath)) {
+                Write-Error "Failed to copy: $($fullName)"
+                exit 1
+            }
         }
     }
+} else {
+    Write-Host "No payload folder found. Proceeding with script-only installation."
 }
 `, installLocation))
 
@@ -310,14 +321,17 @@ func handlePostInstallScript(action, projectDir string) error {
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
     nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
+    // Set the package description or use a default one.
     description := buildInfo.Product.Description
     if description == "" {
         description = fmt.Sprintf(
             "%s version %s for %s by %s",
-            buildInfo.Product.Name, buildInfo.Product.Version, buildInfo.Product.Identifier, buildInfo.Product.Publisher,
+            buildInfo.Product.Name, buildInfo.Product.Version,
+            buildInfo.Product.Identifier, buildInfo.Product.Publisher,
         )
     }
 
+    // Define the structure of the .nuspec package.
     nuspec := Package{
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
@@ -328,35 +342,57 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         },
     }
 
-    // Include all files from the /payload folder in the .nuspec.
+    // Include all files from the /payload folder in the .nuspec with correct paths.
     payloadPath := filepath.Join(projectDir, "payload")
     if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
-        filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
+        err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
             if err != nil {
                 return err
             }
             if !info.IsDir() {
-                relPath, _ := filepath.Rel(projectDir, path) // Keep "payload/..." path inside the package
+                // Make the path relative to the project directory.
+                relPath, _ := filepath.Rel(projectDir, path)
                 nuspec.Files = append(nuspec.Files, FileRef{
-                    Src:    path,
+                    Src:    relPath,
                     Target: relPath,
                 })
             }
             return nil
         })
+        if err != nil {
+            return "", fmt.Errorf("error walking payload directory: %w", err)
+        }
     }
 
+    // Always include the chocolateyInstall.ps1 script in the package.
     nuspec.Files = append(nuspec.Files, FileRef{
         Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
         Target: filepath.Join("tools", "chocolateyInstall.ps1"),
     })
 
+    // Helper function to add scripts to the nuspec if they exist.
+    addScriptToNuspec := func(nuspec *Package, projectDir, scriptName, target string) {
+        scriptPath := filepath.Join(projectDir, "scripts", scriptName)
+        if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
+            nuspec.Files = append(nuspec.Files, FileRef{
+                Src:    filepath.Join("scripts", scriptName),
+                Target: filepath.Join("tools", target),
+            })
+        }
+    }
+
+    // Include preinstall and postinstall scripts if they exist.
+    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "chocolateyBeforeModify.ps1")
+    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "postinstall.ps1")
+
+    // Create the .nuspec file.
     file, err := os.Create(nuspecPath)
     if err != nil {
         return "", fmt.Errorf("failed to create .nuspec file: %w", err)
     }
     defer file.Close()
 
+    // Encode the .nuspec structure into the file as XML.
     encoder := xml.NewEncoder(file)
     encoder.Indent("", "  ")
     if err := encoder.Encode(nuspec); err != nil {
