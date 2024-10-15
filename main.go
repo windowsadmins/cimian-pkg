@@ -184,7 +184,24 @@ Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
     }
 }
 `)
+`, installLocation))
 
+    // Handle post-install action if provided
+    if action := strings.ToLower(buildInfo.PostInstallAction); action != "" {
+        scriptBuilder.WriteString("\n# Executing post-install action\n")
+        switch action {
+        case "logout":
+            scriptBuilder.WriteString("Write-Host 'Logging out...'\nshutdown /l\n")
+        case "restart":
+            scriptBuilder.WriteString("Write-Host 'Restarting system...'\nshutdown /r /t 0\n")
+        case "none":
+            scriptBuilder.WriteString("Write-Host 'No post-install action required.'\n")
+        default:
+            return fmt.Errorf("unsupported post-install action: %s", action)
+        }
+    }
+
+    // Append custom post-install script if available
     postInstallScriptPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
     if _, err := os.Stat(postInstallScriptPath); err == nil {
         scriptBuilder.WriteString("\n# Post-install script contents\n")
@@ -195,13 +212,7 @@ Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
         scriptBuilder.WriteString(string(postInstallContent))
     }
 
-    switch strings.ToLower(buildInfo.PostInstallAction) {
-    case "logout":
-        scriptBuilder.WriteString("\nshutdown /l\n")
-    case "restart":
-        scriptBuilder.WriteString("\nshutdown /r /t 0\n")
-    }
-
+    // Write the PowerShell script to the tools directory
     if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
         return fmt.Errorf("failed to create tools directory: %w", err)
     }
