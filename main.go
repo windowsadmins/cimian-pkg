@@ -155,12 +155,23 @@ func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) erro
 
     var scriptBuilder strings.Builder
 
-    scriptBuilder.WriteString(`$ErrorActionPreference = 'Stop'
+    // Build the PowerShell script with enhanced logging and validation
+    scriptBuilder.WriteString(fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 
-$installLocation = '` + installLocation + `'
+$installLocation = '%s'
 
-# Ensure the install location exists
-New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+# Ensure the install location exists (if defined)
+if ($installLocation -and $installLocation -ne '') {
+    try {
+        New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
+        Write-Host "Created or verified install location: $installLocation"
+    } catch {
+        Write-Error "Failed to create or access: $installLocation"
+        exit 1
+    }
+} else {
+    Write-Host "No install location specified, skipping creation of directories."
+}
 
 # Copy only the contents of the /payload folder to the install location
 Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
