@@ -173,17 +173,31 @@ if ($installLocation -and $installLocation -ne '') {
     Write-Host "No install location specified, skipping creation of directories."
 }
 
-# Copy only the contents of the /payload folder to the install location
-Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
-    $relativePath = $_.FullName.Substring(("$PSScriptRoot\..\payload").Length).TrimStart('\')
-    $destinationPath = Join-Path $installLocation $relativePath
-    if ($_.PSIsContainer) {
-        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-    } else {
-        Copy-Item -Path $_.FullName -Destination $destinationPath -Force
+# Copy files from the payload folder to the install location (if payload exists)
+$payloadPath = "$PSScriptRoot\..\payload"
+if (Test-Path $payloadPath) {
+    Write-Host "Payload path: $payloadPath"
+    Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
+        $relativePath = $_.FullName.Substring($payloadPath.Length).TrimStart('\')
+        $destinationPath = Join-Path $installLocation $relativePath
+
+        if ($_.PSIsContainer) {
+            New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+            Write-Host "Created directory: $destinationPath"
+        } else {
+            Copy-Item -Path $_.FullName -Destination $destinationPath -Force
+            Write-Host "Copied: $_.FullName -> $destinationPath"
+
+            # Validate if the file was copied successfully
+            if (-not (Test-Path -Path $destinationPath)) {
+                Write-Error "Failed to copy: $_.FullName"
+                exit 1
+            }
+        }
     }
+} else {
+    Write-Host "No payload folder found. Proceeding with script-only installation."
 }
-`)
 `, installLocation))
 
     // Handle post-install action if provided
