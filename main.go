@@ -433,17 +433,17 @@ func main() {
     }
     log.Println("Directories created successfully.")
 
-    // Include preinstall script if it exists
+    // Include preinstall script if it exists.
     if err := includePreinstallScript(projectDir); err != nil {
         log.Fatalf("Error including preinstall script: %v", err)
     }
 
-    // Generate the chocolateyInstall.ps1 script
+    // Generate the chocolateyInstall.ps1 script.
     if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
         log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
     }
 
-    // Generate the .nuspec file and defer its removal after use.
+    // Generate the .nuspec file and defer its removal.
     nuspecPath, err := generateNuspec(buildInfo, projectDir)
     if err != nil {
         log.Fatalf("Error generating .nuspec: %v", err)
@@ -451,28 +451,43 @@ func main() {
     defer os.Remove(nuspecPath)
     log.Printf(".nuspec generated at: %s", nuspecPath)
 
-    // Ensure NuGet is available for packaging.
+    // Ensure NuGet is available.
     checkNuGet()
 
-    // Set the build directory
+    // Set the build directory.
     buildDir := filepath.Join(projectDir, "build")
 
-    // Set the path for the final .nupkg output using the product name and version
-    nupkgPath := filepath.Join(buildDir, buildInfo.Product.Name+"-"+buildInfo.Product.Version+".nupkg")
+    // Define the expected filename using Product Name and Version.
+    builtPkgName := buildInfo.Product.Name + "-" + buildInfo.Product.Version + ".nupkg"
+    builtPkgPath := filepath.Join(buildDir, builtPkgName)
 
-    // Run NuGet to pack the package
+    // Run NuGet to pack the package.
     if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
         log.Fatalf("Error creating package: %v", err)
     }
 
-    // Log the successful package creation
-    log.Printf("Package created successfully: %s", nupkgPath)
+    // Find the generated package in case NuGet used the identifier in the name.
+    searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
+    matches, _ := filepath.Glob(searchPattern)
+
+    var finalPkgPath string
+    if len(matches) > 0 {
+        // Rename the package to the correct built name.
+        log.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
+        if err := os.Rename(matches[0], builtPkgPath); err != nil {
+            log.Fatalf("Failed to rename package: %v", err)
+        }
+        finalPkgPath = builtPkgPath
+    } else {
+        log.Printf("Package matching pattern not found, using: %s", builtPkgPath)
+        finalPkgPath = builtPkgPath
+    }
 
     // Check if signing is required, and sign the package if a certificate is provided.
     if buildInfo.SigningCertificate != "" {
         checkSignTool()
-        if err := signPackage(nupkgPath, buildInfo.SigningCertificate); err != nil {
-            log.Fatalf("Failed to sign package %s: %v", nupkgPath, err)
+        if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
+            log.Fatalf("Failed to sign package %s: %v", finalPkgPath, err)
         }
     } else {
         log.Println("No signing certificate provided. Skipping signing.")
@@ -486,5 +501,6 @@ func main() {
         log.Println("Tools directory removed successfully.")
     }
 
-    log.Printf("Package process completed successfully: %s", nupkgPath)
+    // Log the successful creation with the correct built name.
+    log.Printf("Package created successfully: %s", finalPkgPath)
 }
