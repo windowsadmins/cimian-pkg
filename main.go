@@ -155,7 +155,7 @@ func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) erro
 
     var scriptBuilder strings.Builder
 
-    // Write initial script content
+    // Start building the script content
     scriptBuilder.WriteString(`$ErrorActionPreference = 'Stop'
 
 $installLocation = '` + installLocation + `'
@@ -163,18 +163,19 @@ $installLocation = '` + installLocation + `'
 # Ensure the install location exists
 New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
 
-# Copy the contents of the payload folder to the install location
+# Copy the contents of the payload folder (without the payload folder itself)
 Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
-    $targetPath = Join-Path $installLocation $_.FullName.Substring($_.FullName.IndexOf('payload') + 8)
+    $relativePath = $_.FullName.Substring("$PSScriptRoot\..\payload".Length).TrimStart('\')
+    $destinationPath = Join-Path $installLocation $relativePath
     if ($_.PSIsContainer) {
-        New-Item -ItemType Directory -Force -Path $targetPath | Out-Null
+        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
     } else {
-        Copy-Item -Path $_.FullName -Destination $targetPath -Force
+        Copy-Item -Path $_.FullName -Destination $destinationPath -Force
     }
 }
 `)
 
-    // Append postinstall script content if it exists
+    // Append postinstall script if it exists
     postInstallScriptPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
     if _, err := os.Stat(postInstallScriptPath); err == nil {
         scriptBuilder.WriteString("\n# Post-install script contents\n")
@@ -185,7 +186,7 @@ Get-ChildItem -Path "$PSScriptRoot\..\payload" -Recurse | ForEach-Object {
         scriptBuilder.WriteString(string(postInstallContent))
     }
 
-    // Append postinstall_action logic
+    // Handle postinstall action
     switch strings.ToLower(buildInfo.PostInstallAction) {
     case "logout":
         scriptBuilder.WriteString("\n# Perform logout\nshutdown /l\n")
