@@ -22,7 +22,7 @@ type BuildInfo struct {
         Identifier  string `yaml:"identifier"`
         Version     string `yaml:"version"`
         Name        string `yaml:"name"`
-        Publisher   string `yaml:"publisher"`
+        Developer   string `yaml:"developer"`
         Description string `yaml:"description,omitempty"`
     } `yaml:"product"`
 }
@@ -327,7 +327,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         description = fmt.Sprintf(
             "%s version %s for %s by %s",
             buildInfo.Product.Name, buildInfo.Product.Version,
-            buildInfo.Product.Identifier, buildInfo.Product.Publisher,
+            buildInfo.Product.Identifier, buildInfo.Product.Developer,
         )
     }
 
@@ -336,7 +336,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
         Metadata: Metadata{
             ID:          buildInfo.Product.Identifier,
             Version:     buildInfo.Product.Version,
-            Authors:     buildInfo.Product.Publisher,
+            Authors:     buildInfo.Product.Developer,
             Description: description,
             Tags:        "admin",
         },
