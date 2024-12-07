@@ -1,162 +1,253 @@
 package main
 
 import (
-    "encoding/xml"
-    "flag"
-    "fmt"
-    "gopkg.in/yaml.v2"
-    "log"
-    "os"
-    "os/exec"
-    "path/filepath"
-    "strconv"
-    "strings"
+	"encoding/xml"
+	"flag"
+	"fmt"
+	"io/fs"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+
+	"gopkg.in/yaml.v2"
 )
 
 // BuildInfo holds package build information parsed from YAML.
 type BuildInfo struct {
-    InstallLocation    string `yaml:"install_location"`
-    PostInstallAction  string `yaml:"postinstall_action"`
-    SigningCertificate string `yaml:"signing_certificate,omitempty"`
-    Product            struct {
-        Identifier  string `yaml:"identifier"`
-        Version     string `yaml:"version"`
-        Name        string `yaml:"name"`
-        Developer   string `yaml:"developer"`
-        Description string `yaml:"description,omitempty"`
-    } `yaml:"product"`
+	InstallLocation    string `yaml:"install_location"`
+	PostInstallAction  string `yaml:"postinstall_action"`
+	SigningCertificate string `yaml:"signing_certificate,omitempty"`
+	Product            struct {
+		Identifier  string `yaml:"identifier"`
+		Version     string `yaml:"version"`
+		Name        string `yaml:"name"`
+		Developer   string `yaml:"developer"`
+		Description string `yaml:"description,omitempty"`
+	} `yaml:"product"`
 }
 
 // Package defines the structure of a .nuspec package.
 type Package struct {
-    XMLName  xml.Name  `xml:"package"`
-    Metadata Metadata  `xml:"metadata"`
-    Files    []FileRef `xml:"files>file,omitempty"`
+	XMLName  xml.Name  `xml:"package"`
+	Metadata Metadata  `xml:"metadata"`
+	Files    []FileRef `xml:"files>file,omitempty"`
 }
 
 // Metadata stores the package metadata.
 type Metadata struct {
-    ID          string `xml:"id"`
-    Version     string `xml:"version"`
-    Authors     string `xml:"authors"`
-    Description string `xml:"description"`
-    Tags        string `xml:"tags,omitempty"`
-    Readme      string `xml:"readme,omitempty"`
+	ID          string `xml:"id"`
+	Version     string `xml:"version"`
+	Authors     string `xml:"authors"`
+	Description string `xml:"description"`
+	Tags        string `xml:"tags,omitempty"`
+	Readme      string `xml:"readme,omitempty"`
 }
 
 // FileRef defines the source and target paths for files.
 type FileRef struct {
-    Src    string `xml:"src,attr"`
-    Target string `xml:"target,attr"`
+	Src    string `xml:"src,attr"`
+	Target string `xml:"target,attr"`
 }
 
-// setupLogging configures log output based on verbosity.
 func setupLogging(verbose bool) {
-    log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-    if verbose {
-        log.SetOutput(os.Stdout)
-    } else {
-        log.SetOutput(os.Stderr)
-    }
+	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
+	if verbose {
+		log.SetOutput(os.Stdout)
+	} else {
+		log.SetOutput(os.Stderr)
+	}
 }
 
-// verifyProjectStructure checks that either the payload or scripts folder exists.
 func verifyProjectStructure(projectDir string) error {
-    payloadPath := filepath.Join(projectDir, "payload")
-    scriptsPath := filepath.Join(projectDir, "scripts")
+	payloadPath := filepath.Join(projectDir, "payload")
+	scriptsPath := filepath.Join(projectDir, "scripts")
 
-    // Check if at least one of the two required paths exists.
-    if _, err := os.Stat(payloadPath); os.IsNotExist(err) {
-        if _, err := os.Stat(scriptsPath); os.IsNotExist(err) {
-            return fmt.Errorf("either 'payload' or 'scripts' directory must exist in the project directory")
-        }
-    }
+	payloadExists := false
+	scriptsExists := false
 
-    // Ensure the build-info.yaml file exists.
-    buildInfoPath := filepath.Join(projectDir, "build-info.yaml")
-    if _, err := os.Stat(buildInfoPath); os.IsNotExist(err) {
-        return fmt.Errorf("'build-info.yaml' file is missing in the project directory")
-    }
+	if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
+		payloadExists = true
+	}
 
-    return nil
+	if _, err := os.Stat(scriptsPath); !os.IsNotExist(err) {
+		scriptsExists = true
+	}
+
+	if !payloadExists && !scriptsExists {
+		return fmt.Errorf("either 'payload' or 'scripts' directory must exist in the project directory")
+	}
+
+	buildInfoPath := filepath.Join(projectDir, "build-info.yaml")
+	if _, err := os.Stat(buildInfoPath); os.IsNotExist(err) {
+		return fmt.Errorf("'build-info.yaml' file is missing in the project directory")
+	}
+
+	return nil
 }
 
-// NormalizePath ensures paths use consistent separators across platforms.
 func NormalizePath(input string) string {
-    return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
+	return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
 }
 
-// readBuildInfo loads and parses build-info.yaml from the given directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
-    path := filepath.Join(projectDir, "build-info.yaml")
-    data, err := os.ReadFile(path)
-    if err != nil {
-        return nil, fmt.Errorf("error reading build-info.yaml: %w", err)
-    }
+	path := filepath.Join(projectDir, "build-info.yaml")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("error reading build-info.yaml: %w", err)
+	}
 
-    var buildInfo BuildInfo
-    if err := yaml.Unmarshal(data, &buildInfo); err != nil {
-        return nil, fmt.Errorf("error parsing YAML: %w", err)
-    }
+	var buildInfo BuildInfo
+	if err := yaml.Unmarshal(data, &buildInfo); err != nil {
+		return nil, fmt.Errorf("error parsing YAML: %w", err)
+	}
 
-    return &buildInfo, nil
+	return &buildInfo, nil
 }
 
-// parseVersion converts version strings to a normalized format.
 func parseVersion(versionStr string) (string, error) {
-    parts := strings.Split(versionStr, ".")
-    var numericParts []string
+	parts := strings.Split(versionStr, ".")
+	var numericParts []string
 
-    // Convert all parts to strings to preserve the original input, ensuring they're valid numbers.
-    for _, part := range parts {
-        if _, err := strconv.Atoi(part); err != nil {
-            return "", fmt.Errorf("invalid version part: %q is not a number", part)
-        }
-        numericParts = append(numericParts, part)
-    }
+	for _, part := range parts {
+		if _, err := strconv.Atoi(part); err != nil {
+			return "", fmt.Errorf("invalid version part: %q is not a number", part)
+		}
+		numericParts = append(numericParts, part)
+	}
 
-    // Join the parts back together to form the version string.
-    return strings.Join(numericParts, "."), nil
+	return strings.Join(numericParts, "."), nil
 }
 
-// createProjectDirectory ensures necessary project directories exist.
 func createProjectDirectory(projectDir string) error {
-    subDirs := []string{
-        "payload",
-        "scripts",
-        "build",
-    }
+	subDirs := []string{
+		"payload",
+		"scripts",
+		"build",
+		"tools",
+	}
 
-    for _, subDir := range subDirs {
-        fullPath := filepath.Join(projectDir, subDir)
-        if err := os.MkdirAll(fullPath, os.ModePerm); err != nil {
-            return fmt.Errorf("failed to create directory %s: %w", fullPath, err)
-        }
-    }
-    return nil
+	for _, subDir := range subDirs {
+		fullPath := filepath.Join(projectDir, subDir)
+		if err := os.MkdirAll(fullPath, os.ModePerm); err != nil {
+			return fmt.Errorf("failed to create directory %s: %w", fullPath, err)
+		}
+	}
+	return nil
 }
 
-// copyFile copies a file from src to dst.
 func copyFile(src, dst string) error {
-    input, err := os.ReadFile(src)
-    if err != nil {
-        return err
-    }
-    if err := os.WriteFile(dst, input, 0644); err != nil {
-        return err
-    }
-    return nil
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(dst, input, 0644); err != nil {
+		return err
+	}
+	return nil
 }
 
-// createChocolateyInstallScript generates the chocolateyInstall.ps1 script.
+func normalizeInstallLocation(path string) string {
+	path = strings.ReplaceAll(path, "/", `\`)
+	if !strings.HasSuffix(path, `\`) {
+		path += `\`
+	}
+	return path
+}
+
+// getPreinstallScripts returns all scripts matching `preinstall*.ps1`
+func getPreinstallScripts(projectDir string) ([]string, error) {
+	scriptsDir := filepath.Join(projectDir, "scripts")
+	var preScripts []string
+	if _, err := os.Stat(scriptsDir); os.IsNotExist(err) {
+		return preScripts, nil
+	}
+
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasPrefix(strings.ToLower(entry.Name()), "preinstall") && strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
+			preScripts = append(preScripts, entry.Name())
+		}
+	}
+
+	sort.Strings(preScripts)
+	return preScripts, nil
+}
+
+// getPostinstallScripts returns all scripts matching `postinstall*.ps1`
+func getPostinstallScripts(projectDir string) ([]string, error) {
+	scriptsDir := filepath.Join(projectDir, "scripts")
+	var postScripts []string
+	if _, err := os.Stat(scriptsDir); os.IsNotExist(err) {
+		return postScripts, nil
+	}
+
+	entries, err := os.ReadDir(scriptsDir)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if entry.Type().IsRegular() && strings.HasPrefix(strings.ToLower(entry.Name()), "postinstall") && strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
+			postScripts = append(postScripts, entry.Name())
+		}
+	}
+
+	sort.Strings(postScripts)
+	return postScripts, nil
+}
+
+// includePreinstallScripts bundles all preinstall*.ps1 scripts into chocolateyBeforeModify.ps1
+func includePreinstallScripts(projectDir string) error {
+	preScripts, err := getPreinstallScripts(projectDir)
+	if err != nil {
+		return err
+	}
+
+	if len(preScripts) == 0 {
+		return nil
+	}
+
+	// Create or overwrite chocolateyBeforeModify.ps1 with concatenation of all preinstall scripts.
+	beforeModifyPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+	var combined []byte
+
+	for _, script := range preScripts {
+		content, err := os.ReadFile(filepath.Join(projectDir, "scripts", script))
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", script, err)
+		}
+		combined = append(combined, []byte(fmt.Sprintf("# Contents of %s\n", script))...)
+		combined = append(combined, content...)
+		combined = append(combined, []byte("\n")...)
+	}
+
+	if err := os.MkdirAll(filepath.Dir(beforeModifyPath), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create tools directory: %w", err)
+	}
+
+	if err := os.WriteFile(beforeModifyPath, combined, 0644); err != nil {
+		return fmt.Errorf("failed to write chocolateyBeforeModify.ps1: %w", err)
+	}
+	return nil
+}
+
+// createChocolateyInstallScript generates chocolateyInstall.ps1 and appends postinstall scripts.
 func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) error {
-    scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
-    installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
+	scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
+	installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
 
-    var scriptBuilder strings.Builder
+	var scriptBuilder strings.Builder
 
-    // Build the PowerShell script with enhanced logging and validation
-    scriptBuilder.WriteString(fmt.Sprintf(`$ErrorActionPreference = 'Stop'
+	// Main installation logic
+	scriptBuilder.WriteString(fmt.Sprintf(`$ErrorActionPreference = 'Stop'
 
 $installLocation = '%s'
 
@@ -204,353 +295,270 @@ if (Test-Path $payloadPath) {
 }
 `, installLocation))
 
-    // Handle post-install action if provided
-    if action := strings.ToLower(buildInfo.PostInstallAction); action != "" {
-        scriptBuilder.WriteString("\n# Executing post-install action\n")
-        switch action {
-        case "logout":
-            scriptBuilder.WriteString("Write-Host 'Logging out...'\nshutdown /l\n")
-        case "restart":
-            scriptBuilder.WriteString("Write-Host 'Restarting system...'\nshutdown /r /t 0\n")
-        case "none":
-            scriptBuilder.WriteString("Write-Host 'No post-install action required.'\n")
-        default:
-            return fmt.Errorf("unsupported post-install action: %s", action)
-        }
-    }
+	// Handle post-install action if provided
+	if action := strings.ToLower(buildInfo.PostInstallAction); action != "" {
+		scriptBuilder.WriteString("\n# Executing post-install action\n")
+		switch action {
+		case "logout":
+			scriptBuilder.WriteString("Write-Host 'Logging out...'\nshutdown /l\n")
+		case "restart":
+			scriptBuilder.WriteString("Write-Host 'Restarting system...'\nshutdown /r /t 0\n")
+		case "none":
+			scriptBuilder.WriteString("Write-Host 'No post-install action required.'\n")
+		default:
+			return fmt.Errorf("unsupported post-install action: %s", action)
+		}
+	}
 
-    // Append custom post-install script if available
-    postInstallScriptPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
-    if _, err := os.Stat(postInstallScriptPath); err == nil {
-        scriptBuilder.WriteString("\n# Post-install script contents\n")
-        postInstallContent, err := os.ReadFile(postInstallScriptPath)
-        if err != nil {
-            return fmt.Errorf("failed to read postinstall.ps1: %w", err)
-        }
-        scriptBuilder.WriteString(string(postInstallContent))
-    }
+	// Write initial chocolateyInstall.ps1 without postinstall scripts
+	if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create tools directory: %w", err)
+	}
+	if err := os.WriteFile(scriptPath, []byte(scriptBuilder.String()), 0644); err != nil {
+		return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
+	}
 
-    // Write the PowerShell script to the tools directory
-    if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
-        return fmt.Errorf("failed to create tools directory: %w", err)
-    }
+	// Now append postinstall scripts
+	postScripts, err := getPostinstallScripts(projectDir)
+	if err != nil {
+		return err
+	}
 
-    if err := os.WriteFile(scriptPath, []byte(scriptBuilder.String()), 0644); err != nil {
-        return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
-    }
-    return nil
+	if len(postScripts) > 0 {
+		f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
+		if err != nil {
+			return fmt.Errorf("failed to open chocolateyInstall.ps1 for append: %w", err)
+		}
+		defer f.Close()
+
+		// Append each postinstall script content
+		for _, script := range postScripts {
+			content, err := os.ReadFile(filepath.Join(projectDir, "scripts", script))
+			if err != nil {
+				return fmt.Errorf("failed to read %s: %w", script, err)
+			}
+			if _, err := f.WriteString(fmt.Sprintf("\n# Post-install script: %s\n", script)); err != nil {
+				return err
+			}
+			if _, err := f.Write(content); err != nil {
+				return err
+			}
+			if _, err := f.WriteString("\n"); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
-// normalizeInstallLocation ensures the install location path is properly formatted.
-func normalizeInstallLocation(path string) string {
-    // Replace forward slashes with backslashes
-    path = strings.ReplaceAll(path, "/", `\`)
-    // Remove any trailing backslashes
-    path = strings.TrimRight(path, `\`)
-    return path
-}
-
-// includePreinstallScript copies preinstall.ps1 to tools\chocolateyBeforeModify.ps1 if it exists.
-func includePreinstallScript(projectDir string) error {
-    preinstallSrcPath := filepath.Join(projectDir, "scripts", "preinstall.ps1")
-    preinstallDstPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
-
-    if _, err := os.Stat(preinstallSrcPath); err == nil {
-        // Ensure the tools directory exists
-        if err := os.MkdirAll(filepath.Dir(preinstallDstPath), os.ModePerm); err != nil {
-            return fmt.Errorf("failed to create tools directory: %w", err)
-        }
-        // Copy the preinstall.ps1 to tools\chocolateyBeforeModify.ps1
-        if err := copyFile(preinstallSrcPath, preinstallDstPath); err != nil {
-            return fmt.Errorf("failed to copy preinstall.ps1 to chocolateyBeforeModify.ps1: %w", err)
-        }
-    }
-    return nil
-}
-
-// handlePostInstallScript manages the postinstall.ps1 file.
-func handlePostInstallScript(action, projectDir string) error {
-    postInstallPath := filepath.Join(projectDir, "scripts", "postinstall.ps1")
-    var command string
-
-    // Determine the command based on the action
-    switch action {
-    case "logout":
-        command = "shutdown /l\n"
-    case "restart":
-        command = "shutdown /r /t 0\n"
-    case "none":
-        log.Println("No post-install action required.")
-        return nil // No further action needed
-    default:
-        return fmt.Errorf("unknown post-install action: %s", action)
-    }
-
-    // Check if postinstall.ps1 exists and handle appropriately
-    var file *os.File
-    if _, err := os.Stat(postInstallPath); os.IsNotExist(err) {
-        // Create a new postinstall.ps1 file
-        log.Printf("Creating new postinstall.ps1: %s", postInstallPath)
-        if err := os.MkdirAll(filepath.Dir(postInstallPath), os.ModePerm); err != nil {
-            return fmt.Errorf("failed to create scripts directory: %v", err)
-        }
-        file, err = os.Create(postInstallPath)
-        if err != nil {
-            return fmt.Errorf("failed to create postinstall.ps1: %v", err)
-        }
-    } else {
-        // Append to the existing postinstall.ps1 file
-        log.Printf("Appending to existing postinstall.ps1: %s", postInstallPath)
-        file, err = os.OpenFile(postInstallPath, os.O_APPEND|os.O_WRONLY, os.ModeAppend)
-        if err != nil {
-            return fmt.Errorf("failed to open postinstall.ps1: %v", err)
-        }
-    }
-    defer file.Close()
-
-    // Write or append the command
-    if _, err := file.WriteString(command); err != nil {
-        return fmt.Errorf("failed to write to postinstall.ps1: %v", err)
-    }
-
-    log.Printf("Post-install command added: %s", command)
-    return nil
-}
-
-// generateNuspec builds the .nuspec file with proper payload handling.
+// generateNuspec builds the .nuspec file
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
-    nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
+	nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
-    // Set the package description or use a default one.
-    description := buildInfo.Product.Description
-    if description == "" {
-        description = fmt.Sprintf(
-            "%s version %s for %s by %s",
-            buildInfo.Product.Name, buildInfo.Product.Version,
-            buildInfo.Product.Identifier, buildInfo.Product.Developer,
-        )
-    }
+	description := buildInfo.Product.Description
+	if description == "" {
+		description = fmt.Sprintf(
+			"%s version %s for %s by %s",
+			buildInfo.Product.Name, buildInfo.Product.Version,
+			buildInfo.Product.Identifier, buildInfo.Product.Developer,
+		)
+	}
 
-    // Define the structure of the .nuspec package.
-    nuspec := Package{
-        Metadata: Metadata{
-            ID:          buildInfo.Product.Identifier,
-            Version:     buildInfo.Product.Version,
-            Authors:     buildInfo.Product.Developer,
-            Description: description,
-            Tags:        "admin",
-        },
-    }
+	nuspec := Package{
+		Metadata: Metadata{
+			ID:          buildInfo.Product.Identifier,
+			Version:     buildInfo.Product.Version,
+			Authors:     buildInfo.Product.Developer,
+			Description: description,
+			Tags:        "admin",
+		},
+	}
 
-    // Include all files from the /payload folder in the .nuspec with correct paths.
-    payloadPath := filepath.Join(projectDir, "payload")
-    if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
-        err := filepath.Walk(payloadPath, func(path string, info os.FileInfo, err error) error {
-            if err != nil {
-                return err
-            }
-            if !info.IsDir() {
-                // Make the path relative to the project directory.
-                relPath, _ := filepath.Rel(projectDir, path)
-                nuspec.Files = append(nuspec.Files, FileRef{
-                    Src:    relPath,
-                    Target: relPath,
-                })
-            }
-            return nil
-        })
-        if err != nil {
-            return "", fmt.Errorf("error walking payload directory: %w", err)
-        }
-    }
+	payloadPath := filepath.Join(projectDir, "payload")
+	if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
+		err := filepath.Walk(payloadPath, func(path string, info fs.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if !info.IsDir() {
+				relPath, _ := filepath.Rel(projectDir, path)
+				relPath = filepath.ToSlash(relPath)
+				nuspec.Files = append(nuspec.Files, FileRef{
+					Src:    relPath,
+					Target: relPath,
+				})
+			}
+			return nil
+		})
+		if err != nil {
+			return "", fmt.Errorf("error walking payload directory: %w", err)
+		}
+	}
 
-    // Always include the chocolateyInstall.ps1 script in the package.
-    nuspec.Files = append(nuspec.Files, FileRef{
-        Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
-        Target: filepath.Join("tools", "chocolateyInstall.ps1"),
-    })
+	// Always include chocolateyInstall.ps1
+	nuspec.Files = append(nuspec.Files, FileRef{
+		Src:    filepath.Join("tools", "chocolateyInstall.ps1"),
+		Target: filepath.Join("tools", "chocolateyInstall.ps1"),
+	})
 
-    // Helper function to add scripts to the nuspec if they exist.
-    addScriptToNuspec := func(nuspec *Package, projectDir, scriptName, target string) {
-        scriptPath := filepath.Join(projectDir, "scripts", scriptName)
-        if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
-            nuspec.Files = append(nuspec.Files, FileRef{
-                Src:    filepath.Join("scripts", scriptName),
-                Target: filepath.Join("tools", target),
-            })
-        }
-    }
+	// If we have preinstall scripts, they are combined into chocolateyBeforeModify.ps1
+	preScripts, err := getPreinstallScripts(projectDir)
+	if err != nil {
+		return "", err
+	}
+	if len(preScripts) > 0 {
+		// We know chocolateyBeforeModify.ps1 will be created if preinstall scripts exist
+		nuspec.Files = append(nuspec.Files, FileRef{
+			Src:    filepath.Join("tools", "chocolateyBeforeModify.ps1"),
+			Target: filepath.Join("tools", "chocolateyBeforeModify.ps1"),
+		})
+	}
 
-    // Include preinstall and postinstall scripts if they exist.
-    addScriptToNuspec(&nuspec, projectDir, "preinstall.ps1", "chocolateyBeforeModify.ps1")
-    addScriptToNuspec(&nuspec, projectDir, "postinstall.ps1", "postinstall.ps1")
+	// Postinstall scripts are appended directly into chocolateyInstall.ps1 content,
+	// so we don't need to add them separately as files (they are not separate tools/* files).
+	// They are merged into chocolateyInstall.ps1 content.
 
-    // Create the .nuspec file.
-    file, err := os.Create(nuspecPath)
-    if err != nil {
-        return "", fmt.Errorf("failed to create .nuspec file: %w", err)
-    }
-    defer file.Close()
+	file, err := os.Create(nuspecPath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create .nuspec file: %w", err)
+	}
+	defer file.Close()
 
-    // Encode the .nuspec structure into the file as XML.
-    encoder := xml.NewEncoder(file)
-    encoder.Indent("", "  ")
-    if err := encoder.Encode(nuspec); err != nil {
-        return "", fmt.Errorf("failed to encode .nuspec: %w", err)
-    }
+	encoder := xml.NewEncoder(file)
+	encoder.Indent("", "  ")
+	if err := encoder.Encode(nuspec); err != nil {
+		return "", fmt.Errorf("failed to encode .nuspec: %w", err)
+	}
 
-    return nuspecPath, nil
+	return nuspecPath, nil
 }
 
-// Helper function to add scripts to the nuspec if they exist
-func addScriptToNuspec(nuspec *Package, projectDir, scriptName, target string) {
-    scriptPath := filepath.Join(projectDir, "scripts", scriptName)
-    if _, err := os.Stat(scriptPath); !os.IsNotExist(err) {
-        nuspec.Files = append(nuspec.Files, FileRef{
-            Src:    filepath.Join("scripts", scriptName),
-            Target: filepath.Join("tools", target),
-        })
-    }
-}
-
-// runCommand executes shell commands with logging.
 func runCommand(command string, args ...string) error {
-    log.Printf("Running: %s %v", command, args)
-    cmd := exec.Command(command, args...)
-    cmd.Stdout = os.Stdout
-    cmd.Stderr = os.Stderr
-    return cmd.Run()
+	log.Printf("Running: %s %v", command, args)
+	cmd := exec.Command(command, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
-// signPackage signs the .nupkg using SignTool.
 func signPackage(nupkgFile, certificate string) error {
-    log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
-    return runCommand(
-        "signtool", "sign", "/n", certificate,
-        "/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
-        "/td", "SHA256", nupkgFile,
-    )
+	log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
+	return runCommand(
+		"signtool", "sign", "/n", certificate,
+		"/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
+		"/td", "SHA256", nupkgFile,
+	)
 }
 
-// check nuget is installed
 func checkNuGet() {
-    if err := runCommand("nuget", "locals", "all", "-list"); err != nil {
-        log.Fatalf(`NuGet is not installed or not in PATH. 
-You can install it via Chocolatey: 
+	if err := runCommand("nuget", "locals", "all", "-list"); err != nil {
+		log.Fatalf(`NuGet is not installed or not in PATH.
+You can install it via Chocolatey:
   choco install nuget.commandline`)
-    }
+	}
 }
 
-// check signtool is installed
 func checkSignTool() {
-    if err := runCommand("signtool", "-?"); err != nil {
-        log.Fatalf("SignTool is not installed or not available: %v", err)
-    }
+	if err := runCommand("signtool", "-?"); err != nil {
+		log.Fatalf("SignTool is not installed or not available: %v", err)
+	}
 }
 
 func main() {
-    var verbose bool
+	var verbose bool
+	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.Parse()
 
-    // Parse any additional flags.
-    flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
-    flag.Parse()
+	if flag.NArg() < 1 {
+		log.Fatalf("Usage: %s <project_directory>", os.Args[0])
+	}
+	projectDir := NormalizePath(flag.Arg(0))
 
-    // Ensure the project directory is provided as the first command-line argument.
-    if flag.NArg() < 1 {
-        log.Fatalf("Usage: %s <project_directory>", os.Args[0])
-    }
-    projectDir := NormalizePath(flag.Arg(0))
+	setupLogging(verbose)
+	log.Printf("Using project directory: %s", projectDir)
 
-    setupLogging(verbose)
+	if err := verifyProjectStructure(projectDir); err != nil {
+		log.Fatalf("Error verifying project structure: %v", err)
+	}
+	log.Println("Project structure verified. Proceeding with package creation...")
 
-    log.Printf("Using project directory: %s", projectDir)
+	buildInfo, err := readBuildInfo(projectDir)
+	if err != nil {
+		log.Fatalf("Error reading build-info.yaml: %v", err)
+	}
 
-    // Verify the project structure exists and is valid.
-    if err := verifyProjectStructure(projectDir); err != nil {
-        log.Fatalf("Error verifying project structure: %v", err)
-    }
-    log.Println("Project structure verified. Proceeding with package creation...")
+	if buildInfo.InstallLocation == "" {
+		log.Fatalf("Error: 'install_location' must be specified in build-info.yaml")
+	}
 
-    // Read build-info.yaml from the provided project directory.
-    buildInfo, err := readBuildInfo(projectDir)
-    if err != nil {
-        log.Fatalf("Error reading build-info.yaml: %v", err)
-    }
+	if _, err = parseVersion(buildInfo.Product.Version); err != nil {
+		log.Fatalf("Error parsing version: %v", err)
+	}
 
-    // Create the required directories inside the project.
-    if err := createProjectDirectory(projectDir); err != nil {
-        log.Fatalf("Error creating directories: %v", err)
-    }
-    log.Println("Directories created successfully.")
+	if err := createProjectDirectory(projectDir); err != nil {
+		log.Fatalf("Error creating directories: %v", err)
+	}
+	log.Println("Directories created successfully.")
 
-    // Include preinstall script if it exists.
-    if err := includePreinstallScript(projectDir); err != nil {
-        log.Fatalf("Error including preinstall script: %v", err)
-    }
+	// Include all preinstall scripts
+	if err := includePreinstallScripts(projectDir); err != nil {
+		log.Fatalf("Error including preinstall scripts: %v", err)
+	}
 
-    // Generate the chocolateyInstall.ps1 script.
-    if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
-        log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
-    }
+	// Create chocolateyInstall.ps1 and append postinstall scripts
+	if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
+		log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
+	}
 
-    // Generate the .nuspec file and defer its removal.
-    nuspecPath, err := generateNuspec(buildInfo, projectDir)
-    if err != nil {
-        log.Fatalf("Error generating .nuspec: %v", err)
-    }
-    defer os.Remove(nuspecPath)
-    log.Printf(".nuspec generated at: %s", nuspecPath)
+	nuspecPath, err := generateNuspec(buildInfo, projectDir)
+	if err != nil {
+		log.Fatalf("Error generating .nuspec: %v", err)
+	}
+	defer os.Remove(nuspecPath)
+	log.Printf(".nuspec generated at: %s", nuspecPath)
 
-    // Ensure NuGet is available.
-    checkNuGet()
+	checkNuGet()
 
-    // Set the build directory.
-    buildDir := filepath.Join(projectDir, "build")
+	buildDir := filepath.Join(projectDir, "build")
+	builtPkgName := buildInfo.Product.Name + "-" + buildInfo.Product.Version + ".nupkg"
+	builtPkgPath := filepath.Join(buildDir, builtPkgName)
 
-    // Define the expected filename using Product Name and Version.
-    builtPkgName := buildInfo.Product.Name + "-" + buildInfo.Product.Version + ".nupkg"
-    builtPkgPath := filepath.Join(buildDir, builtPkgName)
+	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
+		log.Fatalf("Error creating package: %v", err)
+	}
 
-    // Run NuGet to pack the package.
-    if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
-        log.Fatalf("Error creating package: %v", err)
-    }
+	searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
+	matches, _ := filepath.Glob(searchPattern)
 
-    // Find the generated package in case NuGet used the identifier in the name.
-    searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
-    matches, _ := filepath.Glob(searchPattern)
+	var finalPkgPath string
+	if len(matches) > 0 {
+		log.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
+		if err := os.Rename(matches[0], builtPkgPath); err != nil {
+			log.Fatalf("Failed to rename package: %v", err)
+		}
+		finalPkgPath = builtPkgPath
+	} else {
+		log.Printf("Package matching pattern not found, using: %s", builtPkgPath)
+		finalPkgPath = builtPkgPath
+	}
 
-    var finalPkgPath string
-    if len(matches) > 0 {
-        // Rename the package to the correct built name.
-        log.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
-        if err := os.Rename(matches[0], builtPkgPath); err != nil {
-            log.Fatalf("Failed to rename package: %v", err)
-        }
-        finalPkgPath = builtPkgPath
-    } else {
-        log.Printf("Package matching pattern not found, using: %s", builtPkgPath)
-        finalPkgPath = builtPkgPath
-    }
+	if buildInfo.SigningCertificate != "" {
+		checkSignTool()
+		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
+			log.Fatalf("Failed to sign package %s: %v", finalPkgPath, err)
+		}
+	} else {
+		log.Println("No signing certificate provided. Skipping signing.")
+	}
 
-    // Check if signing is required, and sign the package if a certificate is provided.
-    if buildInfo.SigningCertificate != "" {
-        checkSignTool()
-        if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
-            log.Fatalf("Failed to sign package %s: %v", finalPkgPath, err)
-        }
-    } else {
-        log.Println("No signing certificate provided. Skipping signing.")
-    }
+	// Clean up tools directory after packaging if desired.
+	toolsDir := filepath.Join(projectDir, "tools")
+	if err := os.RemoveAll(toolsDir); err != nil {
+		log.Printf("Warning: Failed to remove tools directory: %v", err)
+	} else {
+		log.Println("Tools directory removed successfully.")
+	}
 
-    // Clean up the tools directory after packaging.
-    toolsDir := filepath.Join(projectDir, "tools")
-    if err := os.RemoveAll(toolsDir); err != nil {
-        log.Printf("Warning: Failed to remove tools directory: %v", err)
-    } else {
-        log.Println("Tools directory removed successfully.")
-    }
-
-    // Log the successful creation with the correct built name.
-    log.Printf("Package created successfully: %s", finalPkgPath)
+	log.Printf("Package created successfully: %s", finalPkgPath)
 }
