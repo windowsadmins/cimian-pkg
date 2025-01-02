@@ -139,17 +139,6 @@ func createProjectDirectory(projectDir string) error {
 	return nil
 }
 
-func copyFile(src, dst string) error {
-	input, err := os.ReadFile(src)
-	if err != nil {
-		return err
-	}
-	if err := os.WriteFile(dst, input, 0644); err != nil {
-		return err
-	}
-	return nil
-}
-
 func normalizeInstallLocation(path string) string {
 	path = strings.ReplaceAll(path, "/", `\`)
 	if !strings.HasSuffix(path, `\`) {
@@ -242,17 +231,23 @@ func includePreinstallScripts(projectDir string) error {
 // createChocolateyInstallScript generates chocolateyInstall.ps1 and appends postinstall scripts.
 func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) error {
 	scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
+
+	// Check if the payload folder has any files
+	payloadPath := filepath.Join(projectDir, "payload")
+	hasPayloadFiles, err := payloadDirectoryHasFiles(payloadPath)
+	if err != nil {
+		return fmt.Errorf("failed to check payload folder: %w", err)
+	}
+
 	installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
 
 	var scriptBuilder strings.Builder
+	scriptBuilder.WriteString("$ErrorActionPreference = 'Stop'\n\n")
+	scriptBuilder.WriteString(fmt.Sprintf("$installLocation = '%s'\n\n", installLocation))
 
-	// Main installation logic
-	scriptBuilder.WriteString(fmt.Sprintf(`$ErrorActionPreference = 'Stop'
-
-$installLocation = '%s'
-
-# Ensure the install location exists (if defined)
-if ($installLocation -and $installLocation -ne '') {
+	// If the payload folder actually has files, do the normal create/copy
+	if hasPayloadFiles {
+		scriptBuilder.WriteString(`if ($installLocation -and $installLocation -ne '') {
     try {
         New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
         Write-Host "Created or verified install location: $installLocation"
@@ -264,36 +259,36 @@ if ($installLocation -and $installLocation -ne '') {
     Write-Host "No install location specified, skipping creation of directories."
 }
 
-# Copy files from the payload folder to the install location (if payload exists)
 $payloadPath = "$PSScriptRoot\..\payload"
 $payloadPath = [System.IO.Path]::GetFullPath($payloadPath)
 $payloadPath = $payloadPath.TrimEnd('\', '/')
-if (Test-Path $payloadPath) {
-    Write-Host "Payload path: $payloadPath"
-    Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
-        $fullName = $_.FullName
-        $relativePath = $fullName.Substring($payloadPath.Length)
-        $relativePath = $relativePath.TrimStart('\', '/')
-        $destinationPath = Join-Path $installLocation $relativePath
 
-        if ($_.PSIsContainer) {
-            New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-            Write-Host "Created directory: $destinationPath"
-        } else {
-            Copy-Item -Path $fullName -Destination $destinationPath -Force
-            Write-Host "Copied: $($fullName) -> $destinationPath"
+Write-Host "Payload path: $payloadPath"
+Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
+    $fullName = $_.FullName
+    $relativePath = $fullName.Substring($payloadPath.Length)
+    $relativePath = $relativePath.TrimStart('\', '/')
+    $destinationPath = Join-Path $installLocation $relativePath
 
-            # Validate if the file was copied successfully
-            if (-not (Test-Path -Path $destinationPath)) {
-                Write-Error "Failed to copy: $($fullName)"
-                exit 1
-            }
+    if ($_.PSIsContainer) {
+        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
+        Write-Host "Created directory: $destinationPath"
+    } else {
+        Copy-Item -Path $fullName -Destination $destinationPath -Force
+        Write-Host "Copied: $($fullName) -> $destinationPath"
+
+        if (-not (Test-Path -Path $destinationPath)) {
+            Write-Error "Failed to copy: $($fullName)"
+            exit 1
         }
     }
-} else {
-    Write-Host "No payload folder found. Proceeding with script-only installation."
 }
-`, installLocation))
+`)
+	} else {
+		// Script-only scenario
+		scriptBuilder.WriteString(`Write-Host "No payload files found. Script-only install - skipping directory creation and file copy."
+`)
+	}
 
 	// Handle post-install action if provided
 	if action := strings.ToLower(buildInfo.PostInstallAction); action != "" {
@@ -310,7 +305,7 @@ if (Test-Path $payloadPath) {
 		}
 	}
 
-	// Write initial chocolateyInstall.ps1 without postinstall scripts
+	// Write the base chocolateyInstall.ps1
 	if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create tools directory: %w", err)
 	}
@@ -318,12 +313,11 @@ if (Test-Path $payloadPath) {
 		return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
 	}
 
-	// Now append postinstall scripts
+	// Append postinstall scripts if any
 	postScripts, err := getPostinstallScripts(projectDir)
 	if err != nil {
 		return err
 	}
-
 	if len(postScripts) > 0 {
 		f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
 		if err != nil {
@@ -331,7 +325,6 @@ if (Test-Path $payloadPath) {
 		}
 		defer f.Close()
 
-		// Append each postinstall script content
 		for _, script := range postScripts {
 			content, err := os.ReadFile(filepath.Join(projectDir, "scripts", script))
 			if err != nil {
@@ -465,6 +458,27 @@ func checkSignTool() {
 	}
 }
 
+func payloadDirectoryHasFiles(payloadDir string) (bool, error) {
+	if _, err := os.Stat(payloadDir); os.IsNotExist(err) {
+		// Payload folder doesn't exist at all
+		return false, nil
+	}
+
+	hasFiles := false
+	err := filepath.Walk(payloadDir, func(path string, info fs.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		// If we find at least one regular file, we consider the payload non-empty
+		if !info.IsDir() {
+			hasFiles = true
+			return filepath.SkipDir // no need to keep walking further
+		}
+		return nil
+	})
+	return hasFiles, err
+}
+
 func main() {
 	var verbose bool
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
@@ -488,10 +502,19 @@ func main() {
 		log.Fatalf("Error reading build-info.yaml: %v", err)
 	}
 
-	if buildInfo.InstallLocation == "" {
-		log.Fatalf("Error: 'install_location' must be specified in build-info.yaml")
+	// Check if the payload folder exists and has files
+	payloadPath := filepath.Join(projectDir, "payload")
+	hasPayloadFiles, err := payloadDirectoryHasFiles(payloadPath)
+	if err != nil {
+		log.Fatalf("Error checking payload folder: %v", err)
 	}
 
+	// Only require install_location if the payload folder actually has files.
+	if hasPayloadFiles && buildInfo.InstallLocation == "" {
+		log.Fatalf("Error: 'install_location' must be specified in build-info.yaml because your payload folder is not empty.")
+	}
+
+	// Validate version format
 	if _, err = parseVersion(buildInfo.Product.Version); err != nil {
 		log.Fatalf("Error parsing version: %v", err)
 	}
@@ -506,7 +529,7 @@ func main() {
 		log.Fatalf("Error including preinstall scripts: %v", err)
 	}
 
-	// Create chocolateyInstall.ps1 and append postinstall scripts
+	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
 	if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
 		log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
 	}
@@ -543,6 +566,7 @@ func main() {
 		finalPkgPath = builtPkgPath
 	}
 
+	// Sign if specified
 	if buildInfo.SigningCertificate != "" {
 		checkSignTool()
 		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
@@ -552,7 +576,7 @@ func main() {
 		log.Println("No signing certificate provided. Skipping signing.")
 	}
 
-	// Clean up tools directory after packaging if desired.
+	// Optional: remove the tools directory
 	toolsDir := filepath.Join(projectDir, "tools")
 	if err := os.RemoveAll(toolsDir); err != nil {
 		log.Printf("Warning: Failed to remove tools directory: %v", err)
