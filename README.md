@@ -1,6 +1,6 @@
-## gorillapkg
+## cimianpkg
 
-`gorillapkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Gorilla**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
+`cimianpkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Cimian**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
 
 This tool simplifies the complexities of deployment by abstracting YAML-based configuration and script-based actions and offers **flexible certificate signing** using Windows `SignTool`.
 
@@ -12,17 +12,17 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 - **Post-Install Actions**: Supports automatic **logout** or **restart** after package installation.
 - **Package Signing with `SignTool`**: Allows seamless signing of `.nupkg` packages using a `.pfx` certificate or certificate store.
 - **Smart Readme Inclusion**: Automatically creates and includes a `readme.md` if a description is provided in `build-info.yaml`.
-- **Automated Packaging**: Uses the `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Gorilla**.
+- **Automated Packaging**: Uses the `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Cimian**.
 - **YAML-Driven Configuration**: All metadata and installation instructions come from the `build-info.yaml` file.
 
 ### Prerequisites
 
 #### For Development:
-- **Go** (to build the `gorillapkg` tool).
+- **Go** (to build the `cimianpkg` tool).
 - **NuGet CLI** (for generating `.nupkg` packages).
 
 #### For Deployment:
-- **Chocolatey** or **Gorilla** (for installing `.nupkg` packages).
+- **Chocolatey** or **Cimian** (for installing `.nupkg` packages).
 - **PowerShell** (to run pre- and post-installation scripts).
 - **Windows SDK** (for the `SignTool` utility).
 
@@ -31,8 +31,8 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 Clone the repository:
 
 ```shell
-git clone https://github.com/rodchristiansen/gorilla-pkg.git
-cd gorilla-pkg
+git clone https://github.com/rodchristiansen/cimian-pkg.git
+cd cimian-pkg
 ```
 
 ### Folder Structure for Packages
@@ -53,14 +53,14 @@ The `build-info.yaml` file contains configuration settings for the package:
 
 ```yaml
 product:
-  name: "Gorilla"
+  name: "Cimian"
   version: "2024.10.11"
-  identifier: "com.gorillacorp.gorilla"
-  publisher: "Gorilla Corp"
+  identifier: "com.cimiancorp.cimian"
+  publisher: "Cimian Corp"
   description: "This is the StartSet installer package."
-install_location: "C:\Program Files\Gorilla"
+install_location: "C:\Program Files\Cimian"
 postinstall_action: "none"
-signing_certificate: "Gorilla Corp EV Certificate"
+signing_certificate: "Cimian Corp EV Certificate"
 ```
 
 Here’s the **Field Descriptions** section updated with the `description` field information directly included.
@@ -68,7 +68,7 @@ Here’s the **Field Descriptions** section updated with the `description` field
 #### Field Descriptions
 
 - **`identifier`**:  
-  A unique identifier in reverse-domain style (e.g., `com.gorillacorp.gorilla`). This ensures the package is correctly recognized by the system and prevents naming conflicts.
+  A unique identifier in reverse-domain style (e.g., `com.cimiancorp.cimian`). This ensures the package is correctly recognized by the system and prevents naming conflicts.
 
 - **`version`**:  
   Supports **semantic versioning** (e.g., `1.0.0`) or **date-based versioning** (e.g., `2024.10.11`). Used to determine whether a new installation or update is required during deployments.
@@ -102,7 +102,7 @@ Here’s the **Field Descriptions** section updated with the `description` field
 To create a new package:
 
 ```shell
-gorillapkg <project_dir>
+cimianpkg <project_dir>
 ```
 
 This command will:
@@ -122,7 +122,7 @@ This command will:
 
 ### Package Signing with `SignTool`
 
-If a signing certificate is provided, `gorillapkg` will sign the package using Windows `SignTool`.
+If a signing certificate is provided, `cimianpkg` will sign the package using Windows `SignTool`.
 
 #### Using a .pfx Certificate
 
@@ -133,7 +133,7 @@ signtool sign /f "path\to\certificate.pfx" /p <password> /fd SHA256 /tr http://t
 #### Using the Certificate Store
 
 ```shell
-signtool sign /n "Gorilla Corp EV Certificate" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "path\to\package.nupkg"
+signtool sign /n "Cimian Corp EV Certificate" /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 "path\to\package.nupkg"
 ```
 
 ### Smart Readme Inclusion
@@ -146,13 +146,13 @@ signtool sign /n "Gorilla Corp EV Certificate" /fd SHA256 /tr http://timestamp.d
 #### Building the `.nupkg`
 
 ```shell
-.\gorillapkg.exe C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet
+.\cimianpkg.exe C:\Users\rchristiansen\DevOps\Cimian\packages\StartSet
 ```
 
 #### Installing with Chocolatey
 
 ```shell
-choco install StartSet --source="C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet\build"
+choco install StartSet --source="C:\Users\rchristiansen\DevOps\Cimian\packages\StartSet\build"
 ```
 
 ### Handling Post-Install Actions
@@ -165,7 +165,7 @@ The `postinstall_action` key in `build-info.yaml` triggers system actions:
 ### Example Output
 
 ```
-2024/10/14 13:00:00 main.go:350: Using project directory: C:\Users\rchristiansen\DevOps\Gorilla\packages\StartSet
+2024/10/14 13:00:00 main.go:350: Using project directory: C:\Users\rchristiansen\DevOps\Cimian\packages\StartSet
 2024/10/14 13:00:00 main.go:356: Project structure verified. Proceeding with package creation...
 2024/10/14 13:00:00 main.go:394: Package successfully created: StartSet.nupkg
 2024/10/14 13:00:02 main.go:446: Package signed successfully: StartSet.nupkg
@@ -175,7 +175,7 @@ Restarting system...
 
 ### Summary
 
-`gorillapkg` streamlines the creation and deployment of `.nupkg` packages by:
+`cimianpkg` streamlines the creation and deployment of `.nupkg` packages by:
 - Automating **version control** and **metadata management** through YAML.
 - Supporting **pre-install and post-install scripts**.
 - Providing seamless **package signing** with `SignTool`.
