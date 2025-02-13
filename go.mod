@@ -1,4 +1,4 @@
-module github.com/windowsadmins/gorilla-pkg
+module github.com/windowsadmins/cimian-pkg
 
 go 1.23.0
 
