@@ -36,12 +36,12 @@ jobs:
       - name: Build Binary
         run: |
           mkdir -p bin
-          go build -o bin/gorillapkg.exe main.go
+          go build -o bin/cimianpkg.exe main.go
 
       - name: Package Binaries
         run: |
           mkdir -p release
-          move bin\gorillapkg.exe release\
+          move bin\cimianpkg.exe release\
 
       - name: List Release Files
         run: |
