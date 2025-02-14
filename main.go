@@ -53,6 +53,10 @@ type FileRef struct {
 	Target string `xml:"target,attr"`
 }
 
+var (
+	intuneWinFlag bool
+)
+
 func setupLogging(verbose bool) {
 	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
 	if verbose {
@@ -72,7 +76,6 @@ func verifyProjectStructure(projectDir string) error {
 	if _, err := os.Stat(payloadPath); !os.IsNotExist(err) {
 		payloadExists = true
 	}
-
 	if _, err := os.Stat(scriptsPath); !os.IsNotExist(err) {
 		scriptsExists = true
 	}
@@ -161,7 +164,9 @@ func getPreinstallScripts(projectDir string) ([]string, error) {
 	}
 
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && strings.HasPrefix(strings.ToLower(entry.Name()), "preinstall") && strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
+		if entry.Type().IsRegular() &&
+			strings.HasPrefix(strings.ToLower(entry.Name()), "preinstall") &&
+			strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
 			preScripts = append(preScripts, entry.Name())
 		}
 	}
@@ -184,7 +189,9 @@ func getPostinstallScripts(projectDir string) ([]string, error) {
 	}
 
 	for _, entry := range entries {
-		if entry.Type().IsRegular() && strings.HasPrefix(strings.ToLower(entry.Name()), "postinstall") && strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
+		if entry.Type().IsRegular() &&
+			strings.HasPrefix(strings.ToLower(entry.Name()), "postinstall") &&
+			strings.HasSuffix(strings.ToLower(entry.Name()), ".ps1") {
 			postScripts = append(postScripts, entry.Name())
 		}
 	}
@@ -193,13 +200,12 @@ func getPostinstallScripts(projectDir string) ([]string, error) {
 	return postScripts, nil
 }
 
-// includePreinstallScripts bundles all preinstall*.ps1 scripts into chocolateyBeforeModify.ps1
+// includePreinstallScripts bundles all preinstall*.ps1 into chocolateyBeforeModify.ps1
 func includePreinstallScripts(projectDir string) error {
 	preScripts, err := getPreinstallScripts(projectDir)
 	if err != nil {
 		return err
 	}
-
 	if len(preScripts) == 0 {
 		return nil
 	}
@@ -221,7 +227,6 @@ func includePreinstallScripts(projectDir string) error {
 	if err := os.MkdirAll(filepath.Dir(beforeModifyPath), os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create tools directory: %w", err)
 	}
-
 	if err := os.WriteFile(beforeModifyPath, combined, 0644); err != nil {
 		return fmt.Errorf("failed to write chocolateyBeforeModify.ps1: %w", err)
 	}
@@ -240,7 +245,6 @@ func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) erro
 	}
 
 	installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
-
 	var scriptBuilder strings.Builder
 	scriptBuilder.WriteString("$ErrorActionPreference = 'Stop'\n\n")
 	scriptBuilder.WriteString(fmt.Sprintf("$installLocation = '%s'\n\n", installLocation))
@@ -395,7 +399,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 		Target: filepath.Join("tools", "chocolateyInstall.ps1"),
 	})
 
-	// If we have preinstall scripts, they are combined into chocolateyBeforeModify.ps1
+	// If we have preinstall scripts, they appear as chocolateyBeforeModify.ps1
 	preScripts, err := getPreinstallScripts(projectDir)
 	if err != nil {
 		return "", err
@@ -463,7 +467,6 @@ func payloadDirectoryHasFiles(payloadDir string) (bool, error) {
 		// Payload folder doesn't exist at all
 		return false, nil
 	}
-
 	hasFiles := false
 	err := filepath.Walk(payloadDir, func(path string, info fs.FileInfo, err error) error {
 		if err != nil {
@@ -472,20 +475,79 @@ func payloadDirectoryHasFiles(payloadDir string) (bool, error) {
 		// If we find at least one regular file, we consider the payload non-empty
 		if !info.IsDir() {
 			hasFiles = true
-			return filepath.SkipDir // no need to keep walking further
+			return filepath.SkipDir
 		}
 		return nil
 	})
 	return hasFiles, err
 }
 
+// buildIntuneWin wraps the specified .nupkg into a .intunewin without running it
+func buildIntuneWin(nupkgPath string) error {
+	// Make sure IntuneWinAppUtil.exe is on PATH
+	intuneCmd, err := exec.LookPath("IntuneWinAppUtil.exe")
+	if err != nil {
+		return fmt.Errorf("IntuneWinAppUtil.exe not found in PATH: %w", err)
+	}
+
+	tempDir, err := os.MkdirTemp("", "intunewin_*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp folder: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Copy the nupkg into temp
+	nupkgName := filepath.Base(nupkgPath)
+	destNupkg := filepath.Join(tempDir, nupkgName)
+	if err := copyFile(nupkgPath, destNupkg); err != nil {
+		return fmt.Errorf("failed to copy nupkg: %w", err)
+	}
+
+	// Create a minimal "Install.ps1" that does nothing but exit 0
+	installPS := filepath.Join(tempDir, "Install.ps1")
+	psContent := `Write-Host "No actual install. This .intunewin packages a .nupkg for later use."
+exit 0
+`
+	if err := os.WriteFile(installPS, []byte(psContent), 0644); err != nil {
+		return fmt.Errorf("failed to write Install.ps1: %w", err)
+	}
+
+	// Run IntuneWinAppUtil.exe -c <temp> -s "Install.ps1" -o same folder as nupkg
+	outDir := filepath.Dir(nupkgPath) // put the .intunewin in the same "build" folder
+	args := []string{
+		"-c", tempDir,
+		"-s", filepath.Base(installPS),
+		"-o", outDir,
+	}
+	log.Printf("Running IntuneWinAppUtil.exe with args: %v", args)
+
+	cmd := exec.Command(intuneCmd, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("IntuneWinAppUtil.exe failed: %w", err)
+	}
+
+	log.Printf("Created .intunewin in %s", outDir)
+	return nil
+}
+
+func copyFile(src, dst string) error {
+	input, err := os.ReadFile(src)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(dst, input, 0644)
+}
+
 func main() {
 	var verbose bool
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
+	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg")
 	flag.Parse()
 
 	if flag.NArg() < 1 {
-		log.Fatalf("Usage: %s <project_directory>", os.Args[0])
+		log.Fatalf("Usage: %s [options] <project_directory>\n  -intunewin  optional flag to build a .intunewin from the .nupkg", os.Args[0])
 	}
 	projectDir := NormalizePath(flag.Arg(0))
 
@@ -585,4 +647,14 @@ func main() {
 	}
 
 	log.Printf("Package created successfully: %s", finalPkgPath)
+
+	// If -intunewin was passed, generate the .intunewin
+	if intuneWinFlag {
+		log.Println("User requested .intunewin generation. Wrapping .nupkg into .intunewin ...")
+		if err := buildIntuneWin(finalPkgPath); err != nil {
+			log.Fatalf("Failed to build .intunewin: %v", err)
+		}
+	}
+
+	log.Println("Done.")
 }
