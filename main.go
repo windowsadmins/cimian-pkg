@@ -624,6 +624,18 @@ func copyFile(src, dst string) error {
 	return os.WriteFile(dst, input, 0644)
 }
 
+// cleanBuildDirectory removes all files from the build directory
+func cleanBuildDirectory(projectDir string) error {
+	buildDir := filepath.Join(projectDir, "build")
+	if err := os.RemoveAll(buildDir); err != nil {
+		return fmt.Errorf("failed to clean build directory: %w", err)
+	}
+	if err := os.MkdirAll(buildDir, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to recreate build directory: %w", err)
+	}
+	return nil
+}
+
 func main() {
 	var verbose bool
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
@@ -642,6 +654,12 @@ func main() {
 		log.Fatalf("Error verifying project structure: %v", err)
 	}
 	log.Println("Project structure verified. Proceeding with package creation...")
+
+	// Clean the build directory before proceeding
+	if err := cleanBuildDirectory(projectDir); err != nil {
+		log.Fatalf("Error cleaning build directory: %v", err)
+	}
+	log.Println("Build directory cleaned successfully.")
 
 	buildInfo, err := readBuildInfo(projectDir)
 	if err != nil {
