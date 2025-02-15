@@ -596,8 +596,12 @@ if ($LASTEXITCODE -eq 0) {
 		return fmt.Errorf("failed to write Install.ps1: %w", err)
 	}
 
-	// Finally, run IntuneWinAppUtil.exe to produce the .intunewin
+	// Get the base name without extension for consistent naming
+	baseName := strings.TrimSuffix(nupkgName, filepath.Ext(nupkgName))
+	intunewinName := baseName + ".intunewin"
 	outDir := filepath.Dir(nupkgPath)
+
+	// Run IntuneWinAppUtil without -q parameter
 	args := []string{
 		"-c", tempDir,
 		"-s", filepath.Base(installPS),
@@ -612,7 +616,14 @@ if ($LASTEXITCODE -eq 0) {
 		return fmt.Errorf("IntuneWinAppUtil.exe failed: %w", err)
 	}
 
-	log.Printf("Created .intunewin in %s", outDir)
+	// Rename the generated Install.intunewin to our desired name
+	defaultIntunewin := filepath.Join(outDir, "Install.intunewin")
+	finalIntunewin := filepath.Join(outDir, intunewinName)
+	if err := os.Rename(defaultIntunewin, finalIntunewin); err != nil {
+		return fmt.Errorf("failed to rename .intunewin: %w", err)
+	}
+
+	log.Printf("Created %s in %s", intunewinName, outDir)
 	return nil
 }
 
