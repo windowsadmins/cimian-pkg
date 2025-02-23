@@ -647,14 +647,66 @@ func cleanBuildDirectory(projectDir string) error {
 	return nil
 }
 
+// createNewProject creates a new project structure at the specified path
+func createNewProject(projectPath string) error {
+	// Create the main project directory
+	if err := os.MkdirAll(projectPath, os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create project directory: %w", err)
+	}
+
+	// Create payload and scripts directories
+	dirs := []string{"payload", "scripts"}
+	for _, dir := range dirs {
+		dirPath := filepath.Join(projectPath, dir)
+		if err := os.MkdirAll(dirPath, os.ModePerm); err != nil {
+			return fmt.Errorf("failed to create %s directory: %w", dir, err)
+		}
+	}
+
+	// Create build-info.yaml template
+	buildInfoTemplate := `
+product:
+  name: NuPkgProjectName
+  version: 1.0.0
+  developer: ACME Corp
+  identifier: com.company.projectname
+postinstall_action: none
+signing_certificate: 
+install_location: \
+`
+
+	buildInfoPath := filepath.Join(projectPath, "build-info.yaml")
+	if err := os.WriteFile(buildInfoPath, []byte(buildInfoTemplate), 0644); err != nil {
+		return fmt.Errorf("failed to create build-info.yaml: %w", err)
+	}
+
+	return nil
+}
+
 func main() {
-	var verbose bool
+	var (
+		verbose    bool
+		createPath string
+	)
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg")
+	flag.StringVar(&createPath, "create", "", "Create a new project structure at the specified path")
 	flag.Parse()
 
+	setupLogging(verbose)
+
+	if createPath != "" {
+		createPath = NormalizePath(createPath)
+		log.Printf("Creating new project at: %s", createPath)
+		if err := createNewProject(createPath); err != nil {
+			log.Fatalf("Error creating new project: %v", err)
+		}
+		log.Println("New project created successfully!")
+		return
+	}
+
 	if flag.NArg() < 1 {
-		log.Fatalf("Usage: %s [options] <project_directory>\n  -intunewin  optional flag to build a .intunewin from the .nupkg", os.Args[0])
+		log.Fatalf("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH", os.Args[0])
 	}
 	projectDir := NormalizePath(flag.Arg(0))
 
