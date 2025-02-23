@@ -1,6 +1,6 @@
-## cimianpkg
+## cimipkg
 
-`cimianpkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Cimian**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
+`cimipkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Cimian**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
 
 This tool simplifies the complexities of deployment by abstracting YAML-based configuration and script-based actions and offers **flexible certificate signing** using Windows `SignTool`.
 
@@ -18,7 +18,7 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 ### Prerequisites
 
 #### For Development:
-- **Go** (to build the `cimianpkg` tool).
+- **Go** (to build the `cimipkg` tool).
 - **NuGet CLI** (for generating `.nupkg` packages).
 
 #### For Deployment:
@@ -102,7 +102,7 @@ Here’s the **Field Descriptions** section updated with the `description` field
 To create a new package:
 
 ```shell
-cimianpkg <project_dir>
+cimipkg <project_dir>
 ```
 
 This command will:
@@ -122,7 +122,7 @@ This command will:
 
 ### Package Signing with `SignTool`
 
-If a signing certificate is provided, `cimianpkg` will sign the package using Windows `SignTool`.
+If a signing certificate is provided, `cimipkg` will sign the package using Windows `SignTool`.
 
 #### Using a .pfx Certificate
 
@@ -146,7 +146,7 @@ signtool sign /n "Cimian Corp EV Certificate" /fd SHA256 /tr http://timestamp.di
 #### Building the `.nupkg`
 
 ```shell
-.\cimianpkg.exe C:\Users\rchristiansen\DevOps\Cimian\packages\StartSet
+.\cimipkg.exe C:\Users\rchristiansen\DevOps\Cimian\packages\StartSet
 ```
 
 #### Installing with Chocolatey
@@ -175,7 +175,7 @@ Restarting system...
 
 ### Summary
 
-`cimianpkg` streamlines the creation and deployment of `.nupkg` packages by:
+`cimipkg` streamlines the creation and deployment of `.nupkg` packages by:
 - Automating **version control** and **metadata management** through YAML.
 - Supporting **pre-install and post-install scripts**.
 - Providing seamless **package signing** with `SignTool`.
