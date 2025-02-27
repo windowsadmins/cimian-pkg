@@ -1,5 +1,8 @@
 module github.com/windowsadmins/cimian-pkg
 
-go 1.23.0
+go 1.23
 
-require gopkg.in/yaml.v2 v2.4.0
+require (
+	golang.org/x/sys v0.30.0
+	gopkg.in/yaml.v2 v2.4.0
+)
