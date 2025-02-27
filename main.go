@@ -12,7 +12,8 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/windowsadmins/cimian/cmd/cimipkg/internal/logging"
+	"github.com/windowsadmins/cimian-pkg/internal/logging"
+
 	"gopkg.in/yaml.v2"
 )
 
