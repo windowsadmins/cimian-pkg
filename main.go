@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/windowsadmins/cimian/cmd/cimipkg/internal/logging"
 	"gopkg.in/yaml.v2"
 )
 
@@ -55,15 +55,11 @@ type FileRef struct {
 
 var (
 	intuneWinFlag bool
+	logger        *logging.Logger
 )
 
 func setupLogging(verbose bool) {
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-	if verbose {
-		log.SetOutput(os.Stdout)
-	} else {
-		log.SetOutput(os.Stderr)
-	}
+	logger = logging.New(verbose)
 }
 
 func verifyProjectStructure(projectDir string) error {
@@ -432,7 +428,7 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 }
 
 func runCommand(command string, args ...string) error {
-	log.Printf("Running: %s %v", command, args)
+	logger.Debug("Running: %s %v", command, args)
 	cmd := exec.Command(command, args...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
@@ -440,7 +436,7 @@ func runCommand(command string, args ...string) error {
 }
 
 func signPackage(nupkgFile, certificate string) error {
-	log.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
+	logger.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
 	return runCommand(
 		"signtool", "sign", "/n", certificate,
 		"/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
@@ -450,7 +446,7 @@ func signPackage(nupkgFile, certificate string) error {
 
 func checkNuGet() {
 	if err := runCommand("nuget", "locals", "all", "-list"); err != nil {
-		log.Fatalf(`NuGet is not installed or not in PATH.
+		logger.Fatal(`NuGet is not installed or not in PATH.
 You can install it via Chocolatey:
   choco install nuget.commandline`)
 	}
@@ -458,7 +454,7 @@ You can install it via Chocolatey:
 
 func checkSignTool() {
 	if err := runCommand("signtool", "-?"); err != nil {
-		log.Fatalf("SignTool is not installed or not available: %v", err)
+		logger.Fatal("SignTool is not installed or not available: %v", err)
 	}
 }
 
@@ -607,7 +603,7 @@ if ($LASTEXITCODE -eq 0) {
 		"-s", filepath.Base(installPS),
 		"-o", outDir,
 	}
-	log.Printf("Running IntuneWinAppUtil.exe with args: %v", args)
+	logger.Printf("Running IntuneWinAppUtil.exe with args: %v", args)
 
 	cmd := exec.Command(intuneCmd, args...)
 	cmd.Stdout = os.Stdout
@@ -623,7 +619,7 @@ if ($LASTEXITCODE -eq 0) {
 		return fmt.Errorf("failed to rename .intunewin: %w", err)
 	}
 
-	log.Printf("Created %s in %s", intunewinName, outDir)
+	logger.Printf("Created %s in %s", intunewinName, outDir)
 	return nil
 }
 
@@ -697,76 +693,75 @@ func main() {
 
 	if createPath != "" {
 		createPath = NormalizePath(createPath)
-		log.Printf("Creating new project at: %s", createPath)
+		logger.Printf("Creating new project at: %s", createPath)
 		if err := createNewProject(createPath); err != nil {
-			log.Fatalf("Error creating new project: %v", err)
+			logger.Fatal("Error creating new project: %v", err)
 		}
-		log.Println("New project created successfully!")
+		logger.Success("New project created successfully!")
 		return
 	}
 
 	if flag.NArg() < 1 {
-		log.Fatalf("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH", os.Args[0])
+		logger.Fatal("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH", os.Args[0])
 	}
 	projectDir := NormalizePath(flag.Arg(0))
 
-	setupLogging(verbose)
-	log.Printf("Using project directory: %s", projectDir)
+	logger.Printf("Using project directory: %s", projectDir)
 
 	if err := verifyProjectStructure(projectDir); err != nil {
-		log.Fatalf("Error verifying project structure: %v", err)
+		logger.Fatal("Error verifying project structure: %v", err)
 	}
-	log.Println("Project structure verified. Proceeding with package creation...")
+	logger.Success("Project structure verified. Proceeding with package creation...")
 
 	// Clean the build directory before proceeding
 	if err := cleanBuildDirectory(projectDir); err != nil {
-		log.Fatalf("Error cleaning build directory: %v", err)
+		logger.Fatal("Error cleaning build directory: %v", err)
 	}
-	log.Println("Build directory cleaned successfully.")
+	logger.Success("Build directory cleaned successfully.")
 
 	buildInfo, err := readBuildInfo(projectDir)
 	if err != nil {
-		log.Fatalf("Error reading build-info.yaml: %v", err)
+		logger.Fatal("Error reading build-info.yaml: %v", err)
 	}
 
 	// Check if the payload folder exists and has files
 	payloadPath := filepath.Join(projectDir, "payload")
 	hasPayloadFiles, err := payloadDirectoryHasFiles(payloadPath)
 	if err != nil {
-		log.Fatalf("Error checking payload folder: %v", err)
+		logger.Fatal("Error checking payload folder: %v", err)
 	}
 
 	// Only require install_location if the payload folder actually has files.
 	if hasPayloadFiles && buildInfo.InstallLocation == "" {
-		log.Fatalf("Error: 'install_location' must be specified in build-info.yaml because your payload folder is not empty.")
+		logger.Fatal("Error: 'install_location' must be specified in build-info.yaml because your payload folder is not empty.")
 	}
 
 	// Validate version format
 	if _, err = parseVersion(buildInfo.Product.Version); err != nil {
-		log.Fatalf("Error parsing version: %v", err)
+		logger.Fatal("Error parsing version: %v", err)
 	}
 
 	if err := createProjectDirectory(projectDir); err != nil {
-		log.Fatalf("Error creating directories: %v", err)
+		logger.Fatal("Error creating directories: %v", err)
 	}
-	log.Println("Directories created successfully.")
+	logger.Success("Directories created successfully.")
 
 	// Include all preinstall scripts
 	if err := includePreinstallScripts(projectDir); err != nil {
-		log.Fatalf("Error including preinstall scripts: %v", err)
+		logger.Fatal("Error including preinstall scripts: %v", err)
 	}
 
 	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
 	if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
-		log.Fatalf("Error generating chocolateyInstall.ps1: %v", err)
+		logger.Fatal("Error generating chocolateyInstall.ps1: %v", err)
 	}
 
 	nuspecPath, err := generateNuspec(buildInfo, projectDir)
 	if err != nil {
-		log.Fatalf("Error generating .nuspec: %v", err)
+		logger.Fatal("Error generating .nuspec: %v", err)
 	}
 	defer os.Remove(nuspecPath)
-	log.Printf(".nuspec generated at: %s", nuspecPath)
+	logger.Success(".nuspec generated at: %s", nuspecPath)
 
 	checkNuGet()
 
@@ -775,7 +770,7 @@ func main() {
 	builtPkgPath := filepath.Join(buildDir, builtPkgName)
 
 	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
-		log.Fatalf("Error creating package: %v", err)
+		logger.Fatal("Error creating package: %v", err)
 	}
 
 	searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
@@ -783,13 +778,13 @@ func main() {
 
 	var finalPkgPath string
 	if len(matches) > 0 {
-		log.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
+		logger.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
 		if err := os.Rename(matches[0], builtPkgPath); err != nil {
-			log.Fatalf("Failed to rename package: %v", err)
+			logger.Fatal("Failed to rename package: %v", err)
 		}
 		finalPkgPath = builtPkgPath
 	} else {
-		log.Printf("Package matching pattern not found, using: %s", builtPkgPath)
+		logger.Printf("Package matching pattern not found, using: %s", builtPkgPath)
 		finalPkgPath = builtPkgPath
 	}
 
@@ -797,29 +792,29 @@ func main() {
 	if buildInfo.SigningCertificate != "" {
 		checkSignTool()
 		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
-			log.Fatalf("Failed to sign package %s: %v", finalPkgPath, err)
+			logger.Fatal("Failed to sign package %s: %v", finalPkgPath, err)
 		}
 	} else {
-		log.Println("No signing certificate provided. Skipping signing.")
+		logger.Printf("No signing certificate provided. Skipping signing.")
 	}
 
 	// Optional: remove the tools directory
 	toolsDir := filepath.Join(projectDir, "tools")
 	if err := os.RemoveAll(toolsDir); err != nil {
-		log.Printf("Warning: Failed to remove tools directory: %v", err)
+		logger.Warning("Warning: Failed to remove tools directory: %v", err)
 	} else {
-		log.Println("Tools directory removed successfully.")
+		logger.Success("Tools directory removed successfully.")
 	}
 
-	log.Printf("Package created successfully: %s", finalPkgPath)
+	logger.Success("Package created successfully: %s", finalPkgPath)
 
 	// If -intunewin was passed, generate the .intunewin
 	if intuneWinFlag {
-		log.Println("User requested .intunewin generation. Wrapping .nupkg into .intunewin ...")
+		logger.Printf("User requested .intunewin generation. Wrapping .nupkg into .intunewin ...")
 		if err := buildIntuneWin(finalPkgPath); err != nil {
-			log.Fatalf("Failed to build .intunewin: %v", err)
+			logger.Fatal("Failed to build .intunewin: %v", err)
 		}
 	}
 
-	log.Println("Done.")
+	logger.Success("Done.")
 }
