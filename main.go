@@ -1,3 +1,5 @@
+//cmd/cimipkg/main.go
+
 package main
 
 import (
