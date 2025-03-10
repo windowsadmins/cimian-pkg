@@ -43,10 +43,7 @@ func enableColors() {
 // New creates a new Logger instance
 func New(verbose bool) *Logger {
 	enableColors()
-	flags := log.Ldate | log.Ltime
-	if verbose {
-		flags |= log.Lshortfile
-	}
+	flags := 0
 
 	output := os.Stdout
 	if !verbose {
