@@ -430,20 +430,55 @@ func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 	return nuspecPath, nil
 }
 
-func runCommand(command string, args ...string) error {
-	logger.Debug("Running: %s %v", command, args)
-	cmd := exec.Command(command, args...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
+// runCommand runs a command and propagates the real exit status.
+func runCommand(cmd string, args ...string) error {
+	logger.Debug("Running: %s %v", cmd, args)
+	c := exec.Command(cmd, args...)
+	c.Stdout = os.Stdout
+	c.Stderr = os.Stderr
+	if err := c.Run(); err != nil {
+		// Wrap the original error so callers see the exit-code in logs
+		return fmt.Errorf("%s %v failed: %w", cmd, args, err)
+	}
+	return nil
 }
 
-func signPackage(nupkgFile, certificate string) error {
-	logger.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
+// signPackage tries three timestamp authorities for Authenticode signing.
+func signPackage(pkgPath, certSubject string) error {
+	tsas := []string{
+		"http://timestamp.digicert.com",
+		"http://timestamp.sectigo.com",
+		"http://timestamp.entrust.net/TSS/RFC3161sha2TS",
+	}
+
+	for i, tsa := range tsas {
+		logger.Printf("Signing (attempt %d) with TSA: %s", i+1, tsa)
+		err := runCommand(
+			"signtool", "sign",
+			"/n", certSubject,
+			"/fd", "SHA256",
+			"/tr", tsa,
+			"/td", "SHA256",
+			pkgPath,
+		)
+		if err == nil {
+			logger.Success("signtool succeeded with %s", tsa)
+			return nil
+		}
+		logger.Warning("signtool failed with %s: %v", tsa, err)
+	}
+
+	return fmt.Errorf("signtool failed with all TSAs")
+}
+
+// signNuget adds a NuGet repository signature using a PFX certificate.
+func signNuget(pkgPath, certPfx, pfxPassword string) error {
+	logger.Printf("Adding NuGet repository signature to %s", pkgPath)
 	return runCommand(
-		"signtool", "sign", "/n", certificate,
-		"/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
-		"/td", "SHA256", nupkgFile,
+		"nuget", "sign", pkgPath,
+		"-CertificatePath", certPfx,
+		"-CertificatePassword", pfxPassword,
+		"-Timestamper", "http://timestamp.digicert.com",
 	)
 }
 
@@ -795,7 +830,13 @@ func main() {
 	if buildInfo.SigningCertificate != "" {
 		checkSignTool()
 		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
-			logger.Fatal("Failed to sign package %s: %v", finalPkgPath, err)
+			logger.Fatal("Authenticode signing failed: %v", err)
+		}
+		// optional NuGet repo signature
+		if pfxPath := os.Getenv("SIGN_PFX"); pfxPath != "" {
+			if err := signNuget(finalPkgPath, pfxPath, os.Getenv("SIGN_PFX_PW")); err != nil {
+				logger.Fatal("nuget sign failed: %v", err)
+			}
 		}
 	} else {
 		logger.Printf("No signing certificate provided. Skipping signing.")
