@@ -24,6 +24,7 @@ type BuildInfo struct {
 	InstallLocation    string `yaml:"install_location"`
 	PostInstallAction  string `yaml:"postinstall_action"`
 	SigningCertificate string `yaml:"signing_certificate,omitempty"`
+	SigningThumbprint  string `yaml:"signing_thumbprint,omitempty"`
 	Product            struct {
 		Identifier  string `yaml:"identifier"`
 		Version     string `yaml:"version"`
@@ -348,6 +349,49 @@ Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
 	return nil
 }
 
+// helper – Authenticode-sign all PowerShell scripts in the project ------------
+// Prefer thumbprint if provided, fallback to subject
+func signPowerShellScripts(projectDir, subject, thumbprint string) error {
+	var psFiles []string
+	if err := filepath.WalkDir(projectDir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".ps1") {
+			psFiles = append(psFiles, p)
+		}
+		return nil
+	}); err != nil {
+		return err
+	}
+	if len(psFiles) == 0 {
+		return nil
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	if thumbprint != "" {
+		b.WriteString("$thumb = '" + thumbprint + "'\n")
+		b.WriteString("$cert  = Get-ChildItem Cert:\\CurrentUser\\My\\$thumb\n")
+		b.WriteString("if (-not $cert) { Write-Error 'Signing cert not found by thumbprint'; exit 1 }\n")
+	} else {
+		b.WriteString("$cert = Get-ChildItem Cert:\\CurrentUser\\My |\n")
+		b.WriteString("         Where-Object { $_.Subject -eq '" + subject + "' } |\n")
+		b.WriteString("         Select-Object -First 1\n")
+		b.WriteString("if (-not $cert) { Write-Error 'Signing cert not found by subject'; exit 1 }\n")
+	}
+	b.WriteString("\nforeach ($f in @(@'\n")
+	for _, f := range psFiles {
+		b.WriteString(f + "\n")
+	}
+	b.WriteString("'@.Trim().Split(\"" + "\n" + "\"))) {\n")
+	b.WriteString("    Set-AuthenticodeSignature -FilePath $f -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com' | Out-Null\n")
+	b.WriteString("}\n")
+
+	return runCommand("powershell", "-NoLogo", "-NoProfile", "-NonInteractive",
+		"-Command", b.String())
+}
+
 // generateNuspec builds the .nuspec file
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
 	nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
@@ -438,13 +482,31 @@ func runCommand(command string, args ...string) error {
 	return cmd.Run()
 }
 
-func signPackage(nupkgFile, certificate string) error {
-	logger.Printf("Signing package: %s with certificate: %s", nupkgFile, certificate)
+func signNuGetPackage(pkgPath, cert string) error {
 	return runCommand(
-		"signtool", "sign", "/n", certificate,
-		"/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
-		"/td", "SHA256", nupkgFile,
+		"nuget", "sign", pkgPath,
+		"-CertificateStoreLocation", "CurrentUser",
+		"-CertificateStoreName", "My",
+		"-CertificateSubjectName", cert,
+		"-Timestamper", "http://timestamp.digicert.com",
+		"-TimestampHashAlgorithm", "sha256",
+		"-Overwrite",
 	)
+}
+
+func signPackage(pkgPath, cert string) error {
+	switch strings.ToLower(filepath.Ext(pkgPath)) {
+	case ".nupkg":
+		logger.Printf("Signing NuGet package: %s with certificate: %s", pkgPath, cert)
+		return signNuGetPackage(pkgPath, cert)
+	default:
+		logger.Printf("Signing file: %s with certificate: %s", pkgPath, cert)
+		return runCommand(
+			"signtool", "sign", "/n", cert,
+			"/fd", "SHA256", "/tr", "http://timestamp.digicert.com",
+			"/td", "SHA256", pkgPath,
+		)
+	}
 }
 
 func checkNuGet() {
@@ -452,12 +514,6 @@ func checkNuGet() {
 		logger.Fatal(`NuGet is not installed or not in PATH.
 You can install it via Chocolatey:
   choco install nuget.commandline`)
-	}
-}
-
-func checkSignTool() {
-	if err := runCommand("signtool", "-?"); err != nil {
-		logger.Fatal("SignTool is not installed or not available: %v", err)
 	}
 }
 
@@ -759,6 +815,13 @@ func main() {
 		logger.Fatal("Error generating chocolateyInstall.ps1: %v", err)
 	}
 
+	// Sign PowerShell scripts in tools directory if signing cert is specified
+	if buildInfo.SigningCertificate != "" || buildInfo.SigningThumbprint != "" {
+		if err := signPowerShellScripts(projectDir, buildInfo.SigningCertificate, buildInfo.SigningThumbprint); err != nil {
+			logger.Fatal("Error signing PowerShell scripts: %v", err)
+		}
+	}
+
 	nuspecPath, err := generateNuspec(buildInfo, projectDir)
 	if err != nil {
 		logger.Fatal("Error generating .nuspec: %v", err)
@@ -772,7 +835,7 @@ func main() {
 	builtPkgName := buildInfo.Product.Name + "-" + buildInfo.Product.Version + ".nupkg"
 	builtPkgPath := filepath.Join(buildDir, builtPkgName)
 
-	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis"); err != nil {
+	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis", "-NoDefaultExcludes"); err != nil {
 		logger.Fatal("Error creating package: %v", err)
 	}
 
@@ -793,7 +856,6 @@ func main() {
 
 	// Sign if specified
 	if buildInfo.SigningCertificate != "" {
-		checkSignTool()
 		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
 			logger.Fatal("Failed to sign package %s: %v", finalPkgPath, err)
 		}
