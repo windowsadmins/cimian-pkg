@@ -92,10 +92,20 @@ func verifyProjectStructure(projectDir string) error {
 	return nil
 }
 
+// ───────────────────── helper: detect installer-type ─────────────────────
+func isInstallerPackage(bi *BuildInfo, hasPayload bool) bool {
+	if !hasPayload {
+		return false
+	}
+	return strings.TrimSpace(bi.InstallLocation) == ""
+}
+
+// NormalizePath converts a Windows-style path to a POSIX-style path.
 func NormalizePath(input string) string {
 	return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
 }
 
+// readBuildInfo reads and parses the build-info.yaml file from the project directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	path := filepath.Join(projectDir, "build-info.yaml")
 	data, err := os.ReadFile(path)
@@ -111,6 +121,7 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	return &buildInfo, nil
 }
 
+// parseVersion validates and normalizes the version string to a format suitable for Chocolatey.
 func parseVersion(versionStr string) (string, error) {
 	parts := strings.Split(versionStr, ".")
 	var numericParts []string
@@ -125,6 +136,7 @@ func parseVersion(versionStr string) (string, error) {
 	return strings.Join(numericParts, "."), nil
 }
 
+// createProjectDirectory creates the necessary subdirectories in the project directory.
 func createProjectDirectory(projectDir string) error {
 	subDirs := []string{
 		"payload",
@@ -142,6 +154,7 @@ func createProjectDirectory(projectDir string) error {
 	return nil
 }
 
+// normalizeInstallLocation ensures the install location ends with a backslash
 func normalizeInstallLocation(path string) string {
 	path = strings.ReplaceAll(path, "/", `\`)
 	if !strings.HasSuffix(path, `\`) {
@@ -200,152 +213,134 @@ func getPostinstallScripts(projectDir string) ([]string, error) {
 	return postScripts, nil
 }
 
-// includePreinstallScripts bundles all preinstall*.ps1 into chocolateyBeforeModify.ps1
+// includePreinstallScripts turns the preinstall.ps1 into
+// tools/chocolateyBeforeModify.ps1
+//
+// The generated file now starts with the same header we use in
+// chocolateyInstall.ps1 so behaviour (-Stop, UTF-8, logging) is identical.
 func includePreinstallScripts(projectDir string) error {
 	preScripts, err := getPreinstallScripts(projectDir)
 	if err != nil {
 		return err
 	}
 	if len(preScripts) == 0 {
-		return nil
+		return nil // nothing to do
 	}
 
-	// Create or overwrite chocolateyBeforeModify.ps1 with concatenation of all preinstall scripts.
-	beforeModifyPath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
-	var combined []byte
+	beforePath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+	if err := os.MkdirAll(filepath.Dir(beforePath), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create tools directory: %w", err)
+	}
 
+	var sb strings.Builder
+	// ── keep behaviour in sync with chocolateyInstall.ps1 ───────────────
+	sb.WriteString("$ErrorActionPreference = 'Stop'\n")
+	sb.WriteString("Write-Verbose 'Running chocolateyBeforeModify.ps1'\n\n")
+
+	// ── append each preinstall*.ps1 in lexical order ────────────────────
 	for _, script := range preScripts {
 		content, err := os.ReadFile(filepath.Join(projectDir, "scripts", script))
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", script, err)
 		}
-		combined = append(combined, []byte(fmt.Sprintf("# Contents of %s\n", script))...)
-		combined = append(combined, content...)
-		combined = append(combined, []byte("\n")...)
+		sb.WriteString("# ────────────────────────────────\n")
+		sb.WriteString("# Contents of " + script + "\n")
+		sb.Write(content)
+		if !strings.HasSuffix(sb.String(), "\n") {
+			sb.WriteString("\n")
+		}
+		sb.WriteString("# ────────────────────────────────\n\n")
 	}
 
-	if err := os.MkdirAll(filepath.Dir(beforeModifyPath), os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create tools directory: %w", err)
-	}
-	if err := os.WriteFile(beforeModifyPath, combined, 0644); err != nil {
-		return fmt.Errorf("failed to write chocolateyBeforeModify.ps1: %w", err)
-	}
-	return nil
+	return os.WriteFile(beforePath, []byte(sb.String()), 0644)
 }
 
-// createChocolateyInstallScript generates chocolateyInstall.ps1 and appends postinstall scripts.
-func createChocolateyInstallScript(buildInfo *BuildInfo, projectDir string) error {
+// createChocolateyInstallScript generates tools/chocolateyInstall.ps1.
+//   - If InstallerTypePayload == true we launch the embedded installer in place.
+//   - Otherwise we copy the payload tree to InstallLocation, *using –LiteralPath*
+//     to handle filenames containing [, ], *, ? etc.
+func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPkg bool, hasPayload bool) error {
 	scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
 
-	// Check if the payload folder has any files
-	payloadPath := filepath.Join(projectDir, "payload")
-	hasPayloadFiles, err := payloadDirectoryHasFiles(payloadPath)
-	if err != nil {
-		return fmt.Errorf("failed to check payload folder: %w", err)
-	}
+	var sb strings.Builder
+	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
 
-	installLocation := normalizeInstallLocation(buildInfo.InstallLocation)
-	var scriptBuilder strings.Builder
-	scriptBuilder.WriteString("$ErrorActionPreference = 'Stop'\n\n")
-	scriptBuilder.WriteString(fmt.Sprintf("$installLocation = '%s'\n\n", installLocation))
+	switch {
+	case !hasPayload:
+		sb.WriteString("Write-Host 'No payload files found – script-only package.'\n")
 
-	// If the payload folder actually has files, do the normal create/copy
-	if hasPayloadFiles {
-		scriptBuilder.WriteString(`if ($installLocation -and $installLocation -ne '') {
-    try {
-        New-Item -ItemType Directory -Force -Path $installLocation | Out-Null
-        Write-Host "Created or verified install location: $installLocation"
-    } catch {
-        Write-Error "Failed to create or access: $installLocation"
-        exit 1
-    }
-} else {
-    Write-Host "No install location specified, skipping creation of directories."
+	case installerPkg:
+		sb.WriteString(`
+$payloadDir = Join-Path $PSScriptRoot '..\payload'
+$installer  = Get-ChildItem -Path $payloadDir -Include *.exe,*.msi -File -Recurse | Select-Object -First 1
+if (-not $installer) { Write-Error "No installer found in $payloadDir"; exit 1 }
+
+$pkgArgs = @{
+    packageName         = $env:ChocolateyPackageName
+    fileType            = if ($installer.Extension -ieq '.msi') { 'msi' } else { 'exe' }
+    file                = $installer.FullName
+    silentArgs          = '/S'
+    useOriginalLocation = $true
 }
 
-$payloadPath = "$PSScriptRoot\..\payload"
-$payloadPath = [System.IO.Path]::GetFullPath($payloadPath)
-$payloadPath = $payloadPath.TrimEnd('\', '/')
+Install-ChocolateyPackage @pkgArgs
+if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
+`)
 
-Write-Host "Payload path: $payloadPath"
-Get-ChildItem -Path $payloadPath -Recurse | ForEach-Object {
+	default: // copy-type
+		installLocation := normalizeInstallLocation(bi.InstallLocation)
+		sb.WriteString("$installLocation = '" + installLocation + "'\n\n")
+		sb.WriteString(`
+if ($installLocation) { New-Item -ItemType Directory -Force -Path $installLocation | Out-Null }
+$payloadRoot = Join-Path $PSScriptRoot '..\payload'
+
+Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $fullName = $_.FullName
-    $relativePath = $fullName.Substring($payloadPath.Length)
-    $relativePath = $relativePath.TrimStart('\', '/')
-    $destinationPath = Join-Path $installLocation $relativePath
+    $fullName = [Management.Automation.WildcardPattern]::Escape($fullName)
+    $relative = $fullName.Substring($payloadRoot.Length).TrimStart('\','/')
+    $dest     = Join-Path $installLocation $relative
 
     if ($_.PSIsContainer) {
-        New-Item -ItemType Directory -Force -Path $destinationPath | Out-Null
-        Write-Host "Created directory: $destinationPath"
+        New-Item -ItemType Directory -Force -Path $dest | Out-Null
     } else {
-        Copy-Item -Path $fullName -Destination $destinationPath -Force
-        Write-Host "Copied: $($fullName) -> $destinationPath"
-
-        if (-not (Test-Path -Path $destinationPath)) {
-            Write-Error "Failed to copy: $($fullName)"
+        Copy-Item -LiteralPath $fullName -Destination $dest -Force
+        if (-not (Test-Path -LiteralPath $dest)) {
+            Write-Error "Failed to copy $fullName"
             exit 1
         }
     }
 }
 `)
-	} else {
-		// Script-only scenario
-		scriptBuilder.WriteString(`Write-Host "No payload files found. Script-only install - skipping directory creation and file copy."
-`)
 	}
 
-	// Handle post-install action if provided
-	if action := strings.ToLower(buildInfo.PostInstallAction); action != "" {
-		scriptBuilder.WriteString("\n# Executing post-install action\n")
-		switch action {
-		case "logout":
-			scriptBuilder.WriteString("Write-Host 'Logging out...'\nshutdown /l\n")
-		case "restart":
-			scriptBuilder.WriteString("Write-Host 'Restarting system...'\nshutdown /r /t 0\n")
-		case "none":
-			scriptBuilder.WriteString("Write-Host 'No post-install action required.'\n")
-		default:
-			return fmt.Errorf("unsupported post-install action: %s", action)
-		}
+	switch strings.ToLower(bi.PostInstallAction) {
+	case "logout":
+		sb.WriteString("\nshutdown /l\n")
+	case "restart":
+		sb.WriteString("\nshutdown /r /t 0\n")
 	}
 
-	// Write the base chocolateyInstall.ps1
 	if err := os.MkdirAll(filepath.Dir(scriptPath), os.ModePerm); err != nil {
-		return fmt.Errorf("failed to create tools directory: %w", err)
+		return err
 	}
-	if err := os.WriteFile(scriptPath, []byte(scriptBuilder.String()), 0644); err != nil {
-		return fmt.Errorf("failed to write chocolateyInstall.ps1: %w", err)
+	if err := os.WriteFile(scriptPath, []byte(sb.String()), 0644); err != nil {
+		return err
 	}
 
-	// Append postinstall scripts if any
-	postScripts, err := getPostinstallScripts(projectDir)
+	post, err := getPostinstallScripts(projectDir)
 	if err != nil {
 		return err
 	}
-	if len(postScripts) > 0 {
-		f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
-		if err != nil {
-			return fmt.Errorf("failed to open chocolateyInstall.ps1 for append: %w", err)
-		}
+	if len(post) > 0 {
+		f, _ := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
 		defer f.Close()
-
-		for _, script := range postScripts {
-			content, err := os.ReadFile(filepath.Join(projectDir, "scripts", script))
-			if err != nil {
-				return fmt.Errorf("failed to read %s: %w", script, err)
-			}
-			if _, err := f.WriteString(fmt.Sprintf("\n# Post-install script: %s\n", script)); err != nil {
-				return err
-			}
-			if _, err := f.Write(content); err != nil {
-				return err
-			}
-			if _, err := f.WriteString("\n"); err != nil {
-				return err
-			}
+		for _, s := range post {
+			b, _ := os.ReadFile(filepath.Join(projectDir, "scripts", s))
+			f.WriteString("\n# Post-install script: " + s + "\n")
+			f.Write(b)
+			f.WriteString("\n")
 		}
 	}
-
 	return nil
 }
 
@@ -783,16 +778,16 @@ func main() {
 		logger.Fatal("Error reading build-info.yaml: %v", err)
 	}
 
-	// Check if the payload folder exists and has files
 	payloadPath := filepath.Join(projectDir, "payload")
 	hasPayloadFiles, err := payloadDirectoryHasFiles(payloadPath)
 	if err != nil {
 		logger.Fatal("Error checking payload folder: %v", err)
 	}
 
-	// Only require install_location if the payload folder actually has files.
-	if hasPayloadFiles && buildInfo.InstallLocation == "" {
-		logger.Fatal("Error: 'install_location' must be specified in build-info.yaml because your payload folder is not empty.")
+	installerPkg := isInstallerPackage(buildInfo, hasPayloadFiles)
+
+	if hasPayloadFiles && !installerPkg && buildInfo.InstallLocation == "" {
+		logger.Fatal("Error: 'install_location' must be specified when payload exists and the package is not an installer.")
 	}
 
 	// Validate version format
@@ -811,7 +806,7 @@ func main() {
 	}
 
 	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
-	if err := createChocolateyInstallScript(buildInfo, projectDir); err != nil {
+	if err := createChocolateyInstallScript(buildInfo, projectDir, installerPkg, hasPayloadFiles); err != nil {
 		logger.Fatal("Error generating chocolateyInstall.ps1: %v", err)
 	}
 
