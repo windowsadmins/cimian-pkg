@@ -6,14 +6,18 @@ This tool simplifies the complexities of deployment by abstracting YAML-based co
 
 ### Features
 
-- **Dynamic File Inclusion**: Automatically packages all files and folders in the `payload/` directory.
-- **Script Support**: Supports **pre-install** and **post-install** scripts executed with **elevated privileges**.
-- **Custom Installation Paths**: Configure where the payload files are installed via the YAML configuration.
-- **Post-Install Actions**: Supports automatic **logout** or **restart** after package installation.
-- **Package Signing with `SignTool`**: Allows seamless signing of `.nupkg` packages using a `.pfx` certificate or certificate store.
-- **Smart Readme Inclusion**: Automatically creates and includes a `readme.md` if a description is provided in `build-info.yaml`.
-- **Automated Packaging**: Uses the `nuget` CLI to build `.nupkg` packages for deployment with **Chocolatey** or **Cimian**.
-- **YAML-Driven Configuration**: All metadata and installation instructions come from the `build-info.yaml` file.
+- **Dynamic File Inclusion** – everything in `payload/` is packaged automatically.
+- **Script Support** – unlimited `preinstall*.ps1` and `postinstall*.ps1`, run elevated.
+- **Smart Copy / In-Place Install** –  
+  • If `install_location` **has a value**, payload files are copied there.  
+  • If `install_location` **is empty**, cimipkg assumes the payload contains a
+    vendor installer (embedded `setup.exe`, etc.) and runs it **in-place**
+    from `C:\ProgramData\chocolatey\lib\<pkg>\payload` (no second copy to `%TEMP%`).
+- **Post-Install Actions** – optional `logout` or `restart` after install.
+- **Package Signing** – signs the `.nupkg` with `SignTool` or `nuget sign`.
+- **Automatic `readme.md`** – created only when `description` is present.
+- **One-Shot `.intunewin` Build** – add `-intunewin` to wrap the `.nupkg`
+  for Microsoft Intune.
 
 ### Prerequisites
 
@@ -56,7 +60,7 @@ product:
   name: "Cimian"
   version: "2024.10.11"
   identifier: "com.cimiancorp.cimian"
-  publisher: "Cimian Corp"
+  developer: "Cimian Corp"
   description: "This is the StartSet installer package."
 install_location: "C:\Program Files\Cimian"
 postinstall_action: "none"
@@ -76,7 +80,7 @@ Here’s the **Field Descriptions** section updated with the `description` field
 - **`name`**:  
   The display name of the product. This name will be visible during installation and in package managers like Chocolatey.
 
-- **`publisher`**:  
+- **`developer`**:  
   The organization or individual distributing the package. This helps users identify the source of the software and improves trust.
 
 - **`description`**:  
@@ -182,3 +186,74 @@ Restarting system...
 - Offering **smart readme inclusion** based on the presence of a description.
 
 This tool replaces complex MSI or WiX packaging with a simple, effective solution for Windows software deployment.
+
+### Installer-Type Packages (vendor setups)
+
+If the payload contains a vendor-supplied installer (e.g. Autodesk Maya,
+Unity, Adobe Acrobat) you **do not** need to set any special flag.
+Simply leave `install_location` blank:
+
+```yaml
+product:
+  name: Maya
+  version: 2025.0
+  identifier: ca.emilycarru.winadmins.Maya
+  developer: Autodesk
+install_location:          # ← blank = installer-type
+postinstall_action: none
+```
+
+When this package installs:
+
+1. Chocolatey unzips the `.nupkg` to `C:\ProgramData\chocolatey\lib\Maya`.
+2. `payload\setup.exe` (or the first `.msi`) is executed in place
+   with `-UseOriginalLocation`, so there is no second copy to `%TEMP%`.
+3. Your `postinstall*.ps1` scripts (if any) run after the installer exits.
+
+All other packages that need to copy files (fonts, config, etc.) keep
+their original behaviour by specifying an `install_location`.
+
+#### Example – content-only package
+
+```shell
+project/
+├── payload/
+│   ├── Avenir Next LT Pro Bold.ttf
+│   └── …
+└── build-info.yaml
+```
+
+```yaml
+product:
+  name: FontsLibrary
+  version: 2025.03.08
+  identifier: ca.emilycarru.winadmins.FontsLibrary
+  developer: EmilyCarrU
+install_location: 'C:\Windows\Fonts'   # copy-type package
+postinstall_action: none
+```
+
+Fonts are copied to `C:\Windows\Fonts\` during install.
+
+#### Example – script-only package
+
+```shell
+project/
+├── payload/                   # Empty (no files to copy)
+├── scripts/
+│   ├── preinstall.ps1         # Runs before installation
+│   └── postinstall.ps1        # Runs after installation
+└── build-info.yaml
+```
+
+```yaml
+product:
+  name: ScriptRunner
+  version: 2025.03.08
+  identifier: ca.emilycarru.winadmins.ScriptRunner
+  developer: EmilyCarrU
+install_location:           # No files to copy
+postinstall_action: none
+```
+
+This package runs the `preinstall.ps1` and `postinstall.ps1` scripts without copying any files. It is ideal for tasks like configuring system settings or running maintenance scripts.
