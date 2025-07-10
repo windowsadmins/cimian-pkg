@@ -297,7 +297,7 @@ $payloadRoot = Join-Path $PSScriptRoot '..\payload'
 Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $fullName = $_.FullName
     $fullName = [Management.Automation.WildcardPattern]::Escape($fullName)
-    $relative = $fullName.Replace($payloadRoot, '').TrimStart('\','/')
+    $relative = $fullName.Substring($payloadRoot.Length).TrimStart('\','/')
     $dest     = Join-Path $installLocation $relative
 
     if ($_.PSIsContainer) {
