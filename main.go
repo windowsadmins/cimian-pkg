@@ -293,6 +293,7 @@ if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
 		sb.WriteString(`
 if ($installLocation) { New-Item -ItemType Directory -Force -Path $installLocation | Out-Null }
 $payloadRoot = Join-Path $PSScriptRoot '..\payload'
+$payloadRoot = [System.IO.Path]::GetFullPath($payloadRoot)
 
 Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $fullName = $_.FullName
