@@ -364,45 +364,42 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 		return nil
 	}
 
-	// Create a temporary PowerShell script file
-	tempScript := filepath.Join(os.TempDir(), "cimipkg-sign-"+fmt.Sprintf("%d", os.Getpid())+".ps1")
-	defer os.Remove(tempScript)
-
-	var b strings.Builder
-	b.WriteString("try {\n")
-	b.WriteString("    Import-Module PKI -Force -ErrorAction Stop\n")
+	// Use signtool.exe to sign PowerShell scripts directly
+	var certParam string
 	if thumbprint != "" {
-		b.WriteString("    $thumb = '" + thumbprint + "'\n")
-		b.WriteString("    $cert = Get-Item \"Cert:\\CurrentUser\\My\\$thumb\" -ErrorAction Stop\n")
+		certParam = thumbprint
 	} else {
-		b.WriteString("    $cert = Get-ChildItem \"Cert:\\CurrentUser\\My\" |\n")
-		b.WriteString("             Where-Object { $_.Subject -eq '" + subject + "' } |\n")
-		b.WriteString("             Select-Object -First 1\n")
-		b.WriteString("    if (-not $cert) { throw 'Certificate not found by subject: " + subject + "' }\n")
-	}
-	b.WriteString("    Write-Host \"Using certificate: $($cert.Subject)\"\n")
-	b.WriteString("    foreach ($f in @(@'\n")
-	for _, f := range psFiles {
-		b.WriteString(f + "\n")
-	}
-	b.WriteString("'@.Trim().Split(\"" + "\n" + "\"))) {\n")
-	b.WriteString("        Write-Host \"Signing: $f\"\n")
-	b.WriteString("        Set-AuthenticodeSignature -FilePath $f -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com' | Out-Null\n")
-	b.WriteString("    }\n")
-	b.WriteString("    Write-Host \"All scripts signed successfully\"\n")
-	b.WriteString("} catch {\n")
-	b.WriteString("    Write-Warning \"Certificate signing failed: $($_.Exception.Message)\"\n")
-	b.WriteString("    Write-Warning \"Scripts will not be signed, but package creation will continue\"\n")
-	b.WriteString("    Write-Warning \"This may be due to certificate store access limitations in the current context\"\n")
-	b.WriteString("}\n")
-
-	// Write the script to the temporary file
-	if err := os.WriteFile(tempScript, []byte(b.String()), 0644); err != nil {
-		return fmt.Errorf("failed to create temporary script: %v", err)
+		// Look up certificate by subject name
+		cmd := exec.Command("powershell", "-NoProfile", "-Command",
+			fmt.Sprintf("(Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -like '*%s*' } | Select-Object -First 1).Thumbprint", subject))
+		output, err := cmd.Output()
+		if err != nil {
+			return fmt.Errorf("failed to find certificate by subject '%s': %v", subject, err)
+		}
+		certParam = strings.TrimSpace(string(output))
+		if certParam == "" {
+			return fmt.Errorf("certificate not found by subject: %s", subject)
+		}
 	}
 
-	return runCommand("powershell", "-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass",
-		"-File", tempScript)
+	// Sign each PowerShell file with signtool.exe
+	for _, psFile := range psFiles {
+		args := []string{
+			"sign",
+			"/sha1", certParam,
+			"/fd", "SHA256",
+			"/tr", "http://timestamp.digicert.com",
+			"/td", "SHA256",
+			psFile,
+		}
+		if err := runCommand("signtool", args...); err != nil {
+			return fmt.Errorf("failed to sign %s: %v", psFile, err)
+		}
+		fmt.Printf("Signed PowerShell script: %s\n", psFile)
+	}
+
+	fmt.Printf("All %d PowerShell scripts signed successfully\n", len(psFiles))
+	return nil
 }
 
 // generateNuspec builds the .nuspec file
