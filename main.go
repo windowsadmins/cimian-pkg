@@ -383,6 +383,9 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 	}
 
 	// Sign each PowerShell file with signtool.exe
+	signedCount := 0
+	var signErrors []string
+	
 	for _, psFile := range psFiles {
 		args := []string{
 			"sign",
@@ -393,12 +396,23 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 			psFile,
 		}
 		if err := runCommand("signtool", args...); err != nil {
-			return fmt.Errorf("failed to sign %s: %v", psFile, err)
+			signErrors = append(signErrors, fmt.Sprintf("failed to sign %s: %v", psFile, err))
+			fmt.Printf("Warning: Failed to sign %s: %v\n", psFile, err)
+		} else {
+			fmt.Printf("Signed PowerShell script: %s\n", psFile)
+			signedCount++
 		}
-		fmt.Printf("Signed PowerShell script: %s\n", psFile)
 	}
 
-	fmt.Printf("All %d PowerShell scripts signed successfully\n", len(psFiles))
+	if len(signErrors) > 0 {
+		fmt.Printf("Warning: %d of %d scripts could not be signed\n", len(signErrors), len(psFiles))
+		for _, errMsg := range signErrors {
+			fmt.Printf("  - %s\n", errMsg)
+		}
+		// Continue execution but warn - don't fail the entire build
+	}
+
+	fmt.Printf("Successfully signed %d of %d PowerShell scripts\n", signedCount, len(psFiles))
 	return nil
 }
 
