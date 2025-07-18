@@ -345,75 +345,65 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 	return nil
 }
 
-// helper – Authenticode-sign all PowerShell scripts in the project ------------
+// helper – Authenticode-sign PowerShell scripts in tools/ directory that get packaged
+// Only signs chocolateyInstall.ps1 and chocolateyBeforeModify.ps1, not original scripts in scripts/ folder
 // Prefer thumbprint if provided, fallback to subject
 func signPowerShellScripts(projectDir, subject, thumbprint string) error {
+	// Only sign the generated PowerShell scripts in tools/ directory that get packaged
 	var psFiles []string
-	if err := filepath.WalkDir(projectDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".ps1") {
-			psFiles = append(psFiles, p)
-		}
-		return nil
-	}); err != nil {
-		return err
+
+	// Check for chocolateyInstall.ps1 (always generated)
+	chocolateyInstallPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
+	if _, err := os.Stat(chocolateyInstallPath); err == nil {
+		psFiles = append(psFiles, chocolateyInstallPath)
 	}
+
+	// Check for chocolateyBeforeModify.ps1 (generated from preinstall scripts)
+	chocolateyBeforePath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+	if _, err := os.Stat(chocolateyBeforePath); err == nil {
+		psFiles = append(psFiles, chocolateyBeforePath)
+	}
+
 	if len(psFiles) == 0 {
+		logger.Debug("No PowerShell scripts found in tools/ directory to sign")
 		return nil
 	}
 
-	// If we don't have a thumbprint, find it by certificate subject name
-	if thumbprint == "" && subject != "" {
-		// Use PowerShell to find the certificate thumbprint by subject name
-		// Import the Security module to ensure Cert: drive is available
-		cmdLine := fmt.Sprintf(`
-			Import-Module Microsoft.PowerShell.Security -Force -ErrorAction SilentlyContinue;
-			$ErrorActionPreference = 'Stop';
-			try {
-				$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like '*%s*' } | Select-Object -First 1;
-				if ($cert) { 
-					Write-Output $cert.Thumbprint 
-				} else { 
-					Write-Error 'Certificate not found' 
-				}
-			} catch {
-				Write-Error "Certificate store access failed: $_"
-			}
-		`, subject)
-
-		logger.Debug("Running PowerShell command to find certificate")
-
-		cmd := exec.Command("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmdLine)
-		output, err := cmd.CombinedOutput()
-
-		if err != nil {
-			logger.Debug("PowerShell error output: %s", string(output))
-			return fmt.Errorf("failed to find certificate by subject '%s': %v\nOutput: %s", subject, err, string(output))
-		}
-
-		thumbprint = strings.TrimSpace(string(output))
-		if thumbprint == "" {
-			return fmt.Errorf("certificate not found by subject: %s", subject)
-		}
-		logger.Debug("Found certificate thumbprint: %s", thumbprint)
-	}
-
-	// Now use signtool with the thumbprint to sign each PowerShell file
+	// Sign each PowerShell file using signtool
 	signedCount := 0
 	var signErrors []string
 
 	for _, psFile := range psFiles {
-		args := []string{
-			"sign",
-			"/sha1", thumbprint,
-			"/fd", "SHA256",
-			"/tr", "http://timestamp.digicert.com",
-			"/td", "SHA256",
-			"/v",
-			psFile,
+		var args []string
+
+		// Use thumbprint if provided, otherwise use certificate subject name
+		if thumbprint != "" {
+			args = []string{
+				"sign",
+				"/sha1", thumbprint,
+				"/fd", "SHA256",
+				"/tr", "http://timestamp.digicert.com",
+				"/td", "SHA256",
+				"/v",
+				psFile,
+			}
+			logger.Debug("Signing with thumbprint: %s", thumbprint)
+		} else if subject != "" {
+			args = []string{
+				"sign",
+				"/n", subject,
+				"/fd", "SHA256",
+				"/tr", "http://timestamp.digicert.com",
+				"/td", "SHA256",
+				"/v",
+				psFile,
+			}
+			logger.Debug("Signing with certificate name: %s", subject)
+		} else {
+			signErrors = append(signErrors, fmt.Sprintf("no certificate specified for %s", psFile))
+			continue
 		}
+
 		if err := runCommand("signtool", args...); err != nil {
 			signErrors = append(signErrors, fmt.Sprintf("failed to sign %s: %v", psFile, err))
 			logger.Debug("Warning: Failed to sign %s: %v", psFile, err)
