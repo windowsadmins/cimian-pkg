@@ -364,55 +364,74 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 		return nil
 	}
 
-	// Use signtool.exe to sign PowerShell scripts directly
-	var certParam string
-	if thumbprint != "" {
-		certParam = thumbprint
-	} else {
-		// Look up certificate by subject name
-		cmd := exec.Command("powershell", "-NoProfile", "-Command",
-			fmt.Sprintf("(Get-ChildItem Cert:\\CurrentUser\\My | Where-Object { $_.Subject -like '*%s*' } | Select-Object -First 1).Thumbprint", subject))
-		output, err := cmd.Output()
+	// If we don't have a thumbprint, find it by certificate subject name
+	if thumbprint == "" && subject != "" {
+		// Use PowerShell to find the certificate thumbprint by subject name
+		// Import the Security module to ensure Cert: drive is available
+		cmdLine := fmt.Sprintf(`
+			Import-Module Microsoft.PowerShell.Security -Force -ErrorAction SilentlyContinue;
+			$ErrorActionPreference = 'Stop';
+			try {
+				$cert = Get-ChildItem Cert:\CurrentUser\My | Where-Object { $_.Subject -like '*%s*' } | Select-Object -First 1;
+				if ($cert) { 
+					Write-Output $cert.Thumbprint 
+				} else { 
+					Write-Error 'Certificate not found' 
+				}
+			} catch {
+				Write-Error "Certificate store access failed: $_"
+			}
+		`, subject)
+
+		logger.Debug("Running PowerShell command to find certificate")
+
+		cmd := exec.Command("powershell", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", cmdLine)
+		output, err := cmd.CombinedOutput()
+
 		if err != nil {
-			return fmt.Errorf("failed to find certificate by subject '%s': %v", subject, err)
+			logger.Debug("PowerShell error output: %s", string(output))
+			return fmt.Errorf("failed to find certificate by subject '%s': %v\nOutput: %s", subject, err, string(output))
 		}
-		certParam = strings.TrimSpace(string(output))
-		if certParam == "" {
+
+		thumbprint = strings.TrimSpace(string(output))
+		if thumbprint == "" {
 			return fmt.Errorf("certificate not found by subject: %s", subject)
 		}
+		logger.Debug("Found certificate thumbprint: %s", thumbprint)
 	}
 
-	// Sign each PowerShell file with signtool.exe
+	// Now use signtool with the thumbprint to sign each PowerShell file
 	signedCount := 0
 	var signErrors []string
-	
+
 	for _, psFile := range psFiles {
 		args := []string{
 			"sign",
-			"/sha1", certParam,
+			"/sha1", thumbprint,
 			"/fd", "SHA256",
 			"/tr", "http://timestamp.digicert.com",
 			"/td", "SHA256",
+			"/v",
 			psFile,
 		}
 		if err := runCommand("signtool", args...); err != nil {
 			signErrors = append(signErrors, fmt.Sprintf("failed to sign %s: %v", psFile, err))
-			fmt.Printf("Warning: Failed to sign %s: %v\n", psFile, err)
+			logger.Debug("Warning: Failed to sign %s: %v", psFile, err)
 		} else {
-			fmt.Printf("Signed PowerShell script: %s\n", psFile)
+			logger.Debug("Signed PowerShell script: %s", psFile)
 			signedCount++
 		}
 	}
 
 	if len(signErrors) > 0 {
-		fmt.Printf("Warning: %d of %d scripts could not be signed\n", len(signErrors), len(psFiles))
+		logger.Debug("Warning: %d of %d scripts could not be signed", len(signErrors), len(psFiles))
 		for _, errMsg := range signErrors {
-			fmt.Printf("  - %s\n", errMsg)
+			logger.Debug("  - %s", errMsg)
 		}
-		// Continue execution but warn - don't fail the entire build
+		// Don't fail the build, just warn
 	}
 
-	fmt.Printf("Successfully signed %d of %d PowerShell scripts\n", signedCount, len(psFiles))
+	logger.Debug("Successfully signed %d of %d PowerShell scripts", signedCount, len(psFiles))
 	return nil
 }
 
