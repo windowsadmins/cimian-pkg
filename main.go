@@ -345,9 +345,15 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 	return nil
 }
 
+// Auto-detect enterprise certificate using the same logic as build.ps1
+func getEnterpriseCertificateName() string {
+	// This matches the certificate name defined in build.ps1
+	return "EmilyCarrU Intune Windows Enterprise Certificate"
+}
+
 // helper – Authenticode-sign PowerShell scripts in tools/ directory that get packaged
 // Only signs chocolateyInstall.ps1 and chocolateyBeforeModify.ps1, not original scripts in scripts/ folder
-// Prefer thumbprint if provided, fallback to subject
+// Auto-detects enterprise certificate if none specified
 func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 	// Only sign the generated PowerShell scripts in tools/ directory that get packaged
 	var psFiles []string
@@ -367,6 +373,12 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 	if len(psFiles) == 0 {
 		logger.Debug("No PowerShell scripts found in tools/ directory to sign")
 		return nil
+	}
+
+	// Auto-detect enterprise certificate if none specified
+	if subject == "" && thumbprint == "" {
+		subject = getEnterpriseCertificateName()
+		logger.Debug("Auto-detected enterprise certificate: %s", subject)
 	}
 
 	// Sign each PowerShell file using signtool
