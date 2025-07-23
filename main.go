@@ -282,6 +282,12 @@ $pkgArgs = @{
     useOriginalLocation = $true
 }
 
+# ─────── user overrides ───────
+if ($global:CimianInstallerArgs -is [hashtable]) {
+    $pkgArgs += $global:CimianInstallerArgs   # merge / override keys
+}
+# ──────────────────────────────
+
 Install-ChocolateyPackage @pkgArgs
 if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
 `)
