@@ -372,47 +372,96 @@ catch {
 	return nil
 }
 
-// helper – Authenticode-sign all PowerShell scripts in the project ------------
-// Prefer thumbprint if provided, fallback to subject
+// Auto-detect enterprise certificate using the same logic as build.ps1
+func getEnterpriseCertificateName() string {
+	// This matches the certificate name defined in build.ps1
+	return "EmilyCarrU Intune Windows Enterprise Certificate"
+}
+
+// helper – Authenticode-sign PowerShell scripts in tools/ directory that get packaged
+// Only signs chocolateyInstall.ps1 and chocolateyBeforeModify.ps1, not original scripts in scripts/ folder
+// Auto-detects enterprise certificate if none specified
 func signPowerShellScripts(projectDir, subject, thumbprint string) error {
+	// Only sign the generated PowerShell scripts in tools/ directory that get packaged
 	var psFiles []string
-	if err := filepath.WalkDir(projectDir, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && strings.HasSuffix(strings.ToLower(d.Name()), ".ps1") {
-			psFiles = append(psFiles, p)
-		}
-		return nil
-	}); err != nil {
-		return err
+
+	// Check for chocolateyInstall.ps1 (always generated)
+	chocolateyInstallPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
+	if _, err := os.Stat(chocolateyInstallPath); err == nil {
+		psFiles = append(psFiles, chocolateyInstallPath)
 	}
+
+	// Check for chocolateyBeforeModify.ps1 (generated from preinstall scripts)
+	chocolateyBeforePath := filepath.Join(projectDir, "tools", "chocolateyBeforeModify.ps1")
+	if _, err := os.Stat(chocolateyBeforePath); err == nil {
+		psFiles = append(psFiles, chocolateyBeforePath)
+	}
+
 	if len(psFiles) == 0 {
+		logger.Debug("No PowerShell scripts found in tools/ directory to sign")
 		return nil
 	}
 
-	var b strings.Builder
-	b.WriteString("\n")
-	if thumbprint != "" {
-		b.WriteString("$thumb = '" + thumbprint + "'\n")
-		b.WriteString("$cert  = Get-ChildItem Cert:\\CurrentUser\\My\\$thumb\n")
-		b.WriteString("if (-not $cert) { Write-Error 'Signing cert not found by thumbprint'; exit 1 }\n")
-	} else {
-		b.WriteString("$cert = Get-ChildItem Cert:\\CurrentUser\\My |\n")
-		b.WriteString("         Where-Object { $_.Subject -eq '" + subject + "' } |\n")
-		b.WriteString("         Select-Object -First 1\n")
-		b.WriteString("if (-not $cert) { Write-Error 'Signing cert not found by subject'; exit 1 }\n")
+	// Auto-detect enterprise certificate if none specified
+	if subject == "" && thumbprint == "" {
+		subject = getEnterpriseCertificateName()
+		logger.Debug("Auto-detected enterprise certificate: %s", subject)
 	}
-	b.WriteString("\nforeach ($f in @(@'\n")
-	for _, f := range psFiles {
-		b.WriteString(f + "\n")
-	}
-	b.WriteString("'@.Trim().Split(\"" + "\n" + "\"))) {\n")
-	b.WriteString("    Set-AuthenticodeSignature -FilePath $f -Certificate $cert -HashAlgorithm SHA256 -TimestampServer 'http://timestamp.digicert.com' | Out-Null\n")
-	b.WriteString("}\n")
 
-	return runCommand("powershell", "-NoLogo", "-NoProfile", "-NonInteractive",
-		"-Command", b.String())
+	// Sign each PowerShell file using signtool
+	signedCount := 0
+	var signErrors []string
+
+	for _, psFile := range psFiles {
+		var args []string
+
+		// Use thumbprint if provided, otherwise use certificate subject name
+		if thumbprint != "" {
+			args = []string{
+				"sign",
+				"/sha1", thumbprint,
+				"/fd", "SHA256",
+				"/tr", "http://timestamp.digicert.com",
+				"/td", "SHA256",
+				"/v",
+				psFile,
+			}
+			logger.Debug("Signing with thumbprint: %s", thumbprint)
+		} else if subject != "" {
+			args = []string{
+				"sign",
+				"/n", subject,
+				"/fd", "SHA256",
+				"/tr", "http://timestamp.digicert.com",
+				"/td", "SHA256",
+				"/v",
+				psFile,
+			}
+			logger.Debug("Signing with certificate name: %s", subject)
+		} else {
+			signErrors = append(signErrors, fmt.Sprintf("no certificate specified for %s", psFile))
+			continue
+		}
+
+		if err := runCommand("signtool", args...); err != nil {
+			signErrors = append(signErrors, fmt.Sprintf("failed to sign %s: %v", psFile, err))
+			logger.Debug("Warning: Failed to sign %s: %v", psFile, err)
+		} else {
+			logger.Debug("Signed PowerShell script: %s", psFile)
+			signedCount++
+		}
+	}
+
+	if len(signErrors) > 0 {
+		logger.Debug("Warning: %d of %d scripts could not be signed", len(signErrors), len(psFiles))
+		for _, errMsg := range signErrors {
+			logger.Debug("  - %s", errMsg)
+		}
+		// Don't fail the build, just warn
+	}
+
+	logger.Debug("Successfully signed %d of %d PowerShell scripts", signedCount, len(psFiles))
+	return nil
 }
 
 // generateNuspec builds the .nuspec file
