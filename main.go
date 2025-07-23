@@ -342,6 +342,33 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 			f.WriteString("\n")
 		}
 	}
+
+	// Add payload cleanup at the very end of all chocolateyInstall.ps1 scripts
+	f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open script for cleanup append: %w", err)
+	}
+	defer f.Close()
+
+	cleanupScript := `
+# Clean-up: delete unpacked payload to reclaim disk space
+try {
+    $packageRoot = Split-Path -Parent $PSScriptRoot      # …\lib\<pkg-id>
+    $payloadDir  = Join-Path $packageRoot 'payload'
+
+    if (Test-Path -LiteralPath $payloadDir) {
+        Remove-Item -LiteralPath $payloadDir -Recurse -Force -ErrorAction Stop
+        Write-Host "Deleted payload at $payloadDir"
+    }
+}
+catch {
+    Write-Warning "Payload clean-up failed: $($_.Exception.Message)"
+}
+`
+	if _, err := f.WriteString(cleanupScript); err != nil {
+		return fmt.Errorf("failed to write cleanup script: %w", err)
+	}
+
 	return nil
 }
 
