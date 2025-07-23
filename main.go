@@ -279,7 +279,6 @@ $pkgArgs = @{
     packageName         = $env:ChocolateyPackageName
     fileType            = if ($installer.Extension -ieq '.msi') { 'msi' } else { 'exe' }
     file                = $installer.FullName
-    silentArgs          = '/S'
     useOriginalLocation = $true
 }
 
