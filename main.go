@@ -265,6 +265,13 @@ func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPk
 	var sb strings.Builder
 	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
 
+	// ── always run pre‑install bundle if it exists ─────────────────────────
+	sb.WriteString("$before = Join-Path $PSScriptRoot 'chocolateyBeforeModify.ps1'\n")
+	sb.WriteString("if (Test-Path -LiteralPath $before) {\n")
+	sb.WriteString("    Write-Verbose 'Importing pre‑install script'\n")
+	sb.WriteString("    . $before   # dot‑source so variables persist\n")
+	sb.WriteString("}\n\n")
+
 	switch {
 	case !hasPayload:
 		sb.WriteString("Write-Host 'No payload files found – script-only package.'\n")
