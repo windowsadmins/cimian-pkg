@@ -313,11 +313,23 @@ if ($global:CimianInstallerArgs -is [hashtable]) {
 
 # Remove any keys that are not valid parameters for Install-ChocolateyInstallPackage
 $valid = (Get-Command Install-ChocolateyInstallPackage).Parameters.Keys
-foreach ($k in @($pkgArgs.Keys)) {
-    if ($valid -notcontains $k) { $pkgArgs.Remove($k) }
+
+# Build a brand-new table that only contains legal keys
+$clean = @{}
+foreach ($key in $pkgArgs.Keys) {
+    # -contains is case-insensitive, we also Trim() to remove stray spaces
+    if ( $valid -contains ($key.Trim()) ) {
+        $clean[$key.Trim()] = $pkgArgs[$key]
+    }
 }
 
-Install-ChocolateyInstallPackage @pkgArgs
+# Fail fast if any invalid keys remain (helps with debugging)
+$invalid = $pkgArgs.Keys | Where-Object { $valid -notcontains $_.Trim() }
+if ($invalid) {
+    Write-Warning "Ignoring unknown installer parameter(s): $($invalid -join ', ')"
+}
+
+Install-ChocolateyInstallPackage @clean
 `)
 
 	default: // copy-type
