@@ -304,9 +304,17 @@ $pkgArgs = @{
 
 # ─────── user overrides ───────
 if ($global:CimianInstallerArgs -is [hashtable]) {
-    $pkgArgs += $global:CimianInstallerArgs   # merge / override keys
+    foreach ($kvp in $global:CimianInstallerArgs.GetEnumerator()) {
+        $pkgArgs[$kvp.Key] = $kvp.Value         # add / overwrite keys
+    }
 }
 # ──────────────────────────────
+
+# Remove any keys that are not valid parameters for Install-ChocolateyPackage
+$valid = (Get-Command Install-ChocolateyPackage).Parameters.Keys
+foreach ($k in @($pkgArgs.Keys)) {
+    if ($valid -notcontains $k) { $pkgArgs.Remove($k) }
+}
 
 Install-ChocolateyPackage @pkgArgs
 `)
