@@ -372,6 +372,11 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 	}
 	defer f.Close()
 
+	// Ensure success exit code for Chocolatey
+	if _, err := f.WriteString("\n# Ensure success exit code for Chocolatey\n$global:LASTEXITCODE = 0\n"); err != nil {
+		return fmt.Errorf("failed to write exit code reset: %w", err)
+	}
+
 	cleanupScript := `
 # Clean-up: delete unpacked payload to reclaim disk space
 try {
