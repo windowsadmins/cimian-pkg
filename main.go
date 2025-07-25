@@ -309,7 +309,6 @@ if ($global:CimianInstallerArgs -is [hashtable]) {
 # ──────────────────────────────
 
 Install-ChocolateyPackage @pkgArgs
-if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
 `)
 
 	default: // copy-type
