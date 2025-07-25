@@ -206,9 +206,60 @@ postinstall_action: none
 When this package installs:
 
 1. Chocolatey unzips the `.nupkg` to `C:\ProgramData\chocolatey\lib\Maya`.
-2. `payload\setup.exe` (or the first `.msi`) is executed in place
-   with `-UseOriginalLocation`, so there is no second copy to `%TEMP%`.
-3. Your `postinstall*.ps1` scripts (if any) run after the installer exits.
+2. `scripts\preinstall.ps1` (if present) runs first to configure installer arguments.
+3. `payload\setup.exe` (or the first `.msi`) is executed in place with `Install-ChocolateyPackage`
+   using `-UseOriginalLocation`, so there is no second copy to `%TEMP%`.
+4. Your `postinstall*.ps1` scripts (if any) run after the installer exits for configuration tasks.
+
+#### Customizing Installer Arguments
+
+Use `scripts/preinstall.ps1` to override installer arguments by setting the global hashtable:
+
+```powershell
+# scripts/preinstall.ps1
+$global:CimianInstallerArgs = @{
+    silentArgs = "/S /LOG=Maya.log ACCEPT_EULA=YES"
+    validExitCodes = @(0, 3010)
+}
+
+Write-Host "Maya installer arguments configured: $($global:CimianInstallerArgs.silentArgs)"
+```
+
+**Important**: Do not manually call installers in `postinstall.ps1` scripts for installer-type packages. The installer is automatically executed by `Install-ChocolateyPackage`. Use postinstall scripts only for post-installation configuration (license files, shortcuts, registry settings, etc.).
+
+#### What NOT to Include in Postinstall Scripts
+
+For installer-type packages, **avoid** these patterns in `postinstall.ps1`:
+
+```powershell
+# DON'T DO THIS - Duplicate installer calls
+Start-Process "msiexec.exe" -ArgumentList "/i setup.msi /qn" -Wait
+Start-Process -FilePath "setup.exe" -ArgumentList "/S" -Wait
+& $setupExe /silent
+Invoke-Expression "setup.exe /quiet"
+cmd /c "setup.exe /unattended"
+
+# DON'T DO THIS - Manual installer execution
+$proc = Start-Process -FilePath $setupExe -ArgumentList $arguments -Wait -PassThru
+if ($proc.ExitCode -ne 0) { throw "Installation failed" }
+```
+
+Instead, use postinstall scripts for configuration tasks only:
+
+```powershell
+# ✅ DO THIS - Post-installation configuration
+# Copy license files
+Copy-Item -Path "$PSScriptRoot\license.lic" -Destination "C:\ProgramData\MyApp\" -Force
+
+# Remove unwanted shortcuts
+Remove-Item "C:\Users\Public\Desktop\Unwanted*.lnk" -Force -ErrorAction SilentlyContinue
+
+# Configure registry settings
+New-ItemProperty -Path "HKLM:\SOFTWARE\MyApp" -Name "LicenseServer" -Value "license.company.com"
+
+# Create uninstall scripts
+"C:\Program Files\MyApp\uninstall.exe /S" | Out-File -FilePath "$PSScriptRoot\remove.bat"
+```
 
 All other packages that need to copy files (fonts, config, etc.) keep
 their original behaviour by specifying an `install_location`.
