@@ -296,10 +296,11 @@ $installer  = Get-ChildItem -Path $payloadDir -Include *.exe,*.msi -File -Recurs
 if (-not $installer) { Write-Error "No installer found in $payloadDir"; exit 1 }
 
 $pkgArgs = @{
-    packageName         = $env:ChocolateyPackageName
-    fileType            = if ($installer.Extension -ieq '.msi') { 'msi' } else { 'exe' }
-    file                = $installer.FullName
-    useOriginalLocation = $true
+    PackageName     = $env:ChocolateyPackageName
+    FileType        = if ($installer.Extension -ieq '.msi') { 'msi' } else { 'exe' }
+    File            = $installer.FullName        # local path
+    SilentArgs      = '/qb /norestart'           # default, can be overridden
+    ValidExitCodes  = @(0,3010)
 }
 
 # ─────── user overrides ───────
@@ -310,13 +311,13 @@ if ($global:CimianInstallerArgs -is [hashtable]) {
 }
 # ──────────────────────────────
 
-# Remove any keys that are not valid parameters for Install-ChocolateyPackage
-$valid = (Get-Command Install-ChocolateyPackage).Parameters.Keys
+# Remove any keys that are not valid parameters for Install-ChocolateyInstallPackage
+$valid = (Get-Command Install-ChocolateyInstallPackage).Parameters.Keys
 foreach ($k in @($pkgArgs.Keys)) {
     if ($valid -notcontains $k) { $pkgArgs.Remove($k) }
 }
 
-Install-ChocolateyPackage @pkgArgs
+Install-ChocolateyInstallPackage @pkgArgs
 `)
 
 	default: // copy-type
