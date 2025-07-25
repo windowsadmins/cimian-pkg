@@ -235,7 +235,9 @@ func includePreinstallScripts(projectDir string) error {
 	var sb strings.Builder
 	// ── keep behaviour in sync with chocolateyInstall.ps1 ───────────────
 	sb.WriteString("$ErrorActionPreference = 'Stop'\n")
-	sb.WriteString("Write-Verbose 'Running chocolateyBeforeModify.ps1'\n\n")
+	sb.WriteString("if (-not $env:CIMIAN_PRE_DONE) {\n")
+	sb.WriteString("    Write-Verbose 'Running chocolateyBeforeModify.ps1'\n")
+	sb.WriteString("}\n\n")
 
 	// ── append each preinstall*.ps1 in lexical order ────────────────────
 	for _, script := range preScripts {
@@ -265,13 +267,31 @@ func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPk
 	var sb strings.Builder
 	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
 
+	// ── declare common variables that pre‑install scripts might need ────────
+	sb.WriteString("# Variables available to pre‑install scripts:\n")
+	sb.WriteString("$payloadDir = Join-Path $PSScriptRoot '..\\payload'\n")
+	sb.WriteString("$payloadRoot = Join-Path $PSScriptRoot '..\\payload'\n")
+	sb.WriteString("$payloadRoot = [System.IO.Path]::GetFullPath($payloadRoot)\n")
+	if hasPayload && !installerPkg {
+		installLocation := normalizeInstallLocation(bi.InstallLocation)
+		sb.WriteString("$installLocation = '" + installLocation + "'\n")
+	}
+	sb.WriteString("\n")
+
+	// ── run pre‑install bundle when it exists ──────────────────────────────
+	sb.WriteString("$before = Join-Path $PSScriptRoot 'chocolateyBeforeModify.ps1'\n")
+	sb.WriteString("if (-not $env:CIMIAN_PRE_DONE -and (Test-Path -LiteralPath $before)) {\n")
+	sb.WriteString("    Write-Verbose 'Importing pre‑install script'\n")
+	sb.WriteString("    . $before   # dot‑source so variables/functions persist\n")
+	sb.WriteString("    $env:CIMIAN_PRE_DONE = 1    # avoid duplicate work on upgrade\n")
+	sb.WriteString("}\n\n")
+
 	switch {
 	case !hasPayload:
 		sb.WriteString("Write-Host 'No payload files found – script-only package.'\n")
 
 	case installerPkg:
 		sb.WriteString(`
-$payloadDir = Join-Path $PSScriptRoot '..\payload'
 $installer  = Get-ChildItem -Path $payloadDir -Include *.exe,*.msi -File -Recurse | Select-Object -First 1
 if (-not $installer) { Write-Error "No installer found in $payloadDir"; exit 1 }
 
@@ -293,12 +313,10 @@ if ($LASTEXITCODE -ne 0) { throw "Installer exited with $LASTEXITCODE" }
 `)
 
 	default: // copy-type
-		installLocation := normalizeInstallLocation(bi.InstallLocation)
-		sb.WriteString("$installLocation = '" + installLocation + "'\n\n")
 		sb.WriteString(`
+# Note: Pre‑install scripts run before this copy operation.
+# Payload files are still in $payloadRoot, not yet copied to $installLocation.
 if ($installLocation) { New-Item -ItemType Directory -Force -Path $installLocation | Out-Null }
-$payloadRoot = Join-Path $PSScriptRoot '..\payload'
-$payloadRoot = [System.IO.Path]::GetFullPath($payloadRoot)
 
 Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $fullName = $_.FullName
