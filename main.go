@@ -336,7 +336,9 @@ Install-ChocolateyInstallPackage @clean
 		sb.WriteString(`
 # Note: Pre‑install scripts run before this copy operation.
 # Payload files are still in $payloadRoot, not yet copied to $installLocation.
-if ($installLocation) { New-Item -ItemType Directory -Force -Path $installLocation | Out-Null }
+if ($installLocation -and -not ($installLocation -match '^[A-Za-z]:\\?$')) { 
+    New-Item -ItemType Directory -Force -Path $installLocation | Out-Null 
+}
 
 Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $fullName = $_.FullName
@@ -345,8 +347,16 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
     $dest     = Join-Path $installLocation $relative
 
     if ($_.PSIsContainer) {
-        New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        # Skip creating directory if it's a root directory (C:\, D:\, etc.)
+        if (-not ($dest -match '^[A-Za-z]:\\?$')) {
+            New-Item -ItemType Directory -Force -Path $dest | Out-Null
+        }
     } else {
+        # Ensure parent directory exists before copying file (but skip root directories)
+        $parentDir = Split-Path $dest -Parent
+        if ($parentDir -and -not ($parentDir -match '^[A-Za-z]:\\?$') -and -not (Test-Path -LiteralPath $parentDir)) {
+            New-Item -ItemType Directory -Force -Path $parentDir | Out-Null
+        }
         Copy-Item -LiteralPath $fullName -Destination $dest -Force
         if (-not (Test-Path -LiteralPath $dest)) {
             Write-Error "Failed to copy $fullName"
