@@ -292,44 +292,10 @@ func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPk
 
 	case installerPkg:
 		sb.WriteString(`
-$installer  = Get-ChildItem -Path $payloadDir -Include *.exe,*.msi -File -Recurse | Select-Object -First 1
-if (-not $installer) { Write-Error "No installer found in $payloadDir"; exit 1 }
-
-$pkgArgs = @{
-    PackageName     = $env:ChocolateyPackageName
-    FileType        = if ($installer.Extension -ieq '.msi') { 'msi' } else { 'exe' }
-    File            = $installer.FullName        # local path
-    SilentArgs      = '/qb /norestart'           # default, can be overridden
-    ValidExitCodes  = @(0,3010)
-}
-
-# ─────── user overrides ───────
-if ($global:CimianInstallerArgs -is [hashtable]) {
-    foreach ($kvp in $global:CimianInstallerArgs.GetEnumerator()) {
-        $pkgArgs[$kvp.Key] = $kvp.Value         # add / overwrite keys
-    }
-}
-# ──────────────────────────────
-
-# Remove any keys that are not valid parameters for Install-ChocolateyInstallPackage
-$valid = (Get-Command Install-ChocolateyInstallPackage).Parameters.Keys
-
-# Build a brand-new table that only contains legal keys
-$clean = @{}
-foreach ($key in $pkgArgs.Keys) {
-    # -contains is case-insensitive, we also Trim() to remove stray spaces
-    if ( $valid -contains ($key.Trim()) ) {
-        $clean[$key.Trim()] = $pkgArgs[$key]
-    }
-}
-
-# Fail fast if any invalid keys remain (helps with debugging)
-$invalid = $pkgArgs.Keys | Where-Object { $valid -notcontains $_.Trim() }
-if ($invalid) {
-    Write-Warning "Ignoring unknown installer parameter(s): $($invalid -join ', ')"
-}
-
-Install-ChocolateyInstallPackage @clean
+# Installer-type package: Only pre/postinstall scripts control installation
+# The actual installer execution is handled by postinstall scripts, not chocolateyInstall.ps1
+Write-Host "Installer-type package detected - skipping automatic installer execution"
+Write-Host "Installation will be handled by pre/postinstall scripts only"
 `)
 
 	default: // copy-type
