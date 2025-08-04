@@ -1,8 +1,8 @@
 product:
-  name: "Gorilla"
+  name: "Cimian"
   version: "2024.10.11"
-  identifier: "com.gorillacorp.gorilla"
-  publisher: "Gorilla Corp"
-install_location: "C:\Program Files\Gorilla"
+  identifier: "com.cimiancorp.cimian"
+  publisher: "Cimian Corp"
+install_location: "C:\Program Files\Cimian"
 postinstall_action: "none"
-signing_certificate: "Gorilla Corp EV Certificate"
+signing_certificate: "Cimian Corp EV Certificate"
