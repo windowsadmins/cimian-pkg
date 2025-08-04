@@ -54,5 +54,5 @@ jobs:
         run: |
           $releaseFiles = Get-ChildItem -Path release\*.exe | ForEach-Object { $_.FullName -replace '\\', '/' }
           gh release create $env:RELEASE_VERSION $releaseFiles `
-            --title "GorillaPkg v$env:RELEASE_VERSION" `
+            --title "CimianPkg v$env:RELEASE_VERSION" `
             --notes "Automated release for version $env:RELEASE_VERSION."
