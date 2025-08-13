@@ -105,6 +105,29 @@ func NormalizePath(input string) string {
 	return filepath.FromSlash(strings.ReplaceAll(input, "\\", "/"))
 }
 
+// normalizeUnicodeChars replaces problematic Unicode characters that cause PowerShell syntax errors
+func normalizeUnicodeChars(input string) string {
+	// Replace Unicode en dashes and em dashes with regular hyphens
+	result := strings.ReplaceAll(input, "\u2013", "-") // U+2013 EN DASH
+	result = strings.ReplaceAll(result, "\u2014", "-") // U+2014 EM DASH
+
+	// Replace non-breaking hyphens with regular hyphens
+	result = strings.ReplaceAll(result, "\u2011", "-") // U+2011 NON-BREAKING HYPHEN
+
+	// Replace Unicode quotes with regular quotes
+	result = strings.ReplaceAll(result, "\u201c", `"`) // U+201C LEFT DOUBLE QUOTATION MARK
+	result = strings.ReplaceAll(result, "\u201d", `"`) // U+201D RIGHT DOUBLE QUOTATION MARK
+	result = strings.ReplaceAll(result, "\u2018", "'") // U+2018 LEFT SINGLE QUOTATION MARK
+	result = strings.ReplaceAll(result, "\u2019", "'") // U+2019 RIGHT SINGLE QUOTATION MARK
+
+	// Replace Unicode spaces with regular spaces
+	result = strings.ReplaceAll(result, "\u00a0", " ") // U+00A0 NON-BREAKING SPACE
+	result = strings.ReplaceAll(result, "\u2003", " ") // U+2003 EM SPACE
+	result = strings.ReplaceAll(result, "\u2009", " ") // U+2009 THIN SPACE
+
+	return result
+}
+
 // readBuildInfo reads and parses the build-info.yaml file from the project directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	path := filepath.Join(projectDir, "build-info.yaml")
@@ -163,7 +186,137 @@ func normalizeInstallLocation(path string) string {
 	return path
 }
 
-// getPreinstallScripts returns all scripts matching `preinstall*.ps1`
+// cleanPowerShellScript removes problematic directives that can't be in the middle of a script
+func cleanPowerShellScript(content []byte) []byte {
+	// First, normalize Unicode characters that cause PowerShell syntax errors
+	contentStr := string(content)
+	contentStr = normalizeUnicodeChars(contentStr)
+
+	lines := strings.Split(contentStr, "\n")
+	var cleanedLines []string
+	inParamBlock := false
+	braceDepth := 0
+	tryDepth := 0
+
+	for i, line := range lines {
+		// Normalize Unicode characters in each line
+		line = normalizeUnicodeChars(line)
+		trimmed := strings.TrimSpace(line)
+
+		// Skip empty lines
+		if trimmed == "" {
+			cleanedLines = append(cleanedLines, line)
+			continue
+		}
+
+		// Track parameter block boundaries
+		if strings.HasPrefix(trimmed, "param(") {
+			inParamBlock = true
+			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
+			continue
+		}
+
+		// Skip lines inside param blocks
+		if inParamBlock {
+			if strings.Contains(line, "{") {
+				braceDepth++
+			}
+			if strings.Contains(line, "}") {
+				braceDepth--
+				if braceDepth <= 0 {
+					inParamBlock = false
+					braceDepth = 0
+				}
+			}
+			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
+			continue
+		}
+
+		// Skip lines that contain script-level directives that must be at the start
+		if strings.HasPrefix(trimmed, "[CmdletBinding(") ||
+			strings.HasPrefix(trimmed, "[CmdletBinding()]") ||
+			strings.HasPrefix(trimmed, "param(") ||
+			strings.HasPrefix(trimmed, "param()") ||
+			(strings.HasPrefix(trimmed, "param") && strings.Contains(trimmed, "(")) {
+			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
+			continue
+		}
+
+		// Remove duplicate $ErrorActionPreference (keep only first one which is added by our script header)
+		if strings.HasPrefix(trimmed, "$ErrorActionPreference") {
+			logger.Debug("Cleaning duplicate ErrorActionPreference: %s", trimmed)
+			continue
+		}
+
+		// Track try blocks
+		if strings.Contains(trimmed, "try {") {
+			tryDepth++
+		}
+
+		// Handle malformed try-catch constructs
+		if strings.HasPrefix(trimmed, "} catch {") {
+			if tryDepth == 0 {
+				logger.Debug("Cleaning orphaned catch block (no matching try): %s", trimmed)
+				continue
+			}
+			tryDepth--
+		}
+
+		// Handle orphaned closing braces - DISABLED to prevent breaking valid PowerShell
+		// This was too aggressive and removing valid braces
+		_, _ = trimmed, i // Keep the variable usage to avoid compiler warnings
+
+		// Clean up Install-ChocolateyPackage calls that might have syntax errors
+		if strings.Contains(trimmed, "Install-ChocolateyPackage") && strings.Contains(trimmed, " install ") {
+			// Fix parameter syntax - remove extra "install" parameter
+			cleaned := strings.ReplaceAll(trimmed, " install ", " ")
+			cleaned = strings.ReplaceAll(cleaned, " install", "")
+			logger.Debug("Fixing Install-ChocolateyPackage syntax: %s -> %s", trimmed, cleaned)
+			cleanedLines = append(cleanedLines, strings.Replace(line, trimmed, cleaned, 1))
+			continue
+		}
+
+		cleanedLines = append(cleanedLines, line)
+	}
+
+	return []byte(strings.Join(cleanedLines, "\n"))
+}
+
+// cleanPowerShellScriptWithContext removes problematic directives with global context awareness
+func cleanPowerShellScriptWithContext(content []byte, seenErrorActionPreference *bool) []byte {
+	// First, normalize Unicode characters that cause PowerShell syntax errors
+	contentStr := normalizeUnicodeChars(string(content))
+	lines := strings.Split(contentStr, "\n")
+	var cleanedLines []string
+
+	for _, line := range lines {
+		// Normalize Unicode characters in each line
+		line = normalizeUnicodeChars(line)
+		trimmed := strings.TrimSpace(line)
+
+		// Skip lines that contain script-level directives that must be at the start
+		if strings.HasPrefix(trimmed, "[CmdletBinding(") ||
+			strings.HasPrefix(trimmed, "[CmdletBinding()]") ||
+			trimmed == "param()" ||
+			(strings.HasPrefix(trimmed, "param(") && strings.HasSuffix(trimmed, ")")) {
+			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
+			continue
+		}
+
+		// Remove duplicate $ErrorActionPreference declarations
+		if strings.HasPrefix(trimmed, "$ErrorActionPreference") {
+			if *seenErrorActionPreference {
+				logger.Debug("Cleaning duplicate ErrorActionPreference: %s", trimmed)
+				continue
+			}
+			*seenErrorActionPreference = true
+		}
+
+		cleanedLines = append(cleanedLines, line)
+	}
+
+	return []byte(strings.Join(cleanedLines, "\n"))
+} // getPreinstallScripts returns all scripts matching `preinstall*.ps1`
 func getPreinstallScripts(projectDir string) ([]string, error) {
 	scriptsDir := filepath.Join(projectDir, "scripts")
 	var preScripts []string
@@ -245,9 +398,11 @@ func includePreinstallScripts(projectDir string) error {
 		if err != nil {
 			return fmt.Errorf("failed to read %s: %w", script, err)
 		}
+		// Clean the PowerShell script content to remove problematic directives
+		cleanedContent := cleanPowerShellScript(content)
 		sb.WriteString("# ────────────────────────────────\n")
 		sb.WriteString("# Contents of " + script + "\n")
-		sb.Write(content)
+		sb.Write(cleanedContent)
 		if !strings.HasSuffix(sb.String(), "\n") {
 			sb.WriteString("\n")
 		}
@@ -259,16 +414,18 @@ func includePreinstallScripts(projectDir string) error {
 
 // createChocolateyInstallScript generates tools/chocolateyInstall.ps1.
 //   - If InstallerTypePayload == true we launch the embedded installer in place.
-//   - Otherwise we copy the payload tree to InstallLocation, *using –LiteralPath*
+//   - Otherwise we copy the payload tree to InstallLocation, *using -LiteralPath*
 //     to handle filenames containing [, ], *, ? etc.
 func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPkg bool, hasPayload bool) error {
 	scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
 
 	var sb strings.Builder
-	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
+	// seenErrorActionPreference := false // Track this across the entire script
 
-	// ── declare common variables that pre‑install scripts might need ────────
-	sb.WriteString("# Variables available to pre‑install scripts:\n")
+	// Add initial $ErrorActionPreference only once
+	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
+	// seenErrorActionPreference = true	// ── declare common variables that pre-install scripts might need ────────
+	sb.WriteString("# Variables available to pre-install scripts:\n")
 	sb.WriteString("$payloadDir = Join-Path $PSScriptRoot '..\\payload'\n")
 	sb.WriteString("$payloadRoot = Join-Path $PSScriptRoot '..\\payload'\n")
 	sb.WriteString("$payloadRoot = [System.IO.Path]::GetFullPath($payloadRoot)\n")
@@ -278,17 +435,17 @@ func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPk
 	}
 	sb.WriteString("\n")
 
-	// ── run pre‑install bundle when it exists ──────────────────────────────
+	// ── run pre-install bundle when it exists ──────────────────────────────
 	sb.WriteString("$before = Join-Path $PSScriptRoot 'chocolateyBeforeModify.ps1'\n")
 	sb.WriteString("if (-not $env:CIMIAN_PRE_DONE -and (Test-Path -LiteralPath $before)) {\n")
-	sb.WriteString("    Write-Verbose 'Importing pre‑install script'\n")
-	sb.WriteString("    . $before   # dot‑source so variables/functions persist\n")
+	sb.WriteString("    Write-Verbose 'Importing pre-install script'\n")
+	sb.WriteString("    . $before   # dot-source so variables/functions persist\n")
 	sb.WriteString("    $env:CIMIAN_PRE_DONE = 1    # avoid duplicate work on upgrade\n")
 	sb.WriteString("}\n\n")
 
 	switch {
 	case !hasPayload:
-		sb.WriteString("Write-Host 'No payload files found – script-only package.'\n")
+		sb.WriteString("Write-Host 'No payload files found - script-only package.'\n")
 
 	case installerPkg:
 		sb.WriteString(`
@@ -300,7 +457,7 @@ Write-Host "Installation will be handled by pre/postinstall scripts only"
 
 	default: // copy-type
 		sb.WriteString(`
-# Note: Pre‑install scripts run before this copy operation.
+# Note: Pre-install scripts run before this copy operation.
 # Payload files are still in $payloadRoot, not yet copied to $installLocation.
 if ($installLocation -and -not ($installLocation -match '^[A-Za-z]:\\?$')) { 
     New-Item -ItemType Directory -Force -Path $installLocation | Out-Null 
@@ -356,8 +513,10 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 		defer f.Close()
 		for _, s := range post {
 			b, _ := os.ReadFile(filepath.Join(projectDir, "scripts", s))
+			// Clean the PowerShell script content to remove problematic directives
+			cleanedContent := cleanPowerShellScript(b)
 			f.WriteString("\n# Post-install script: " + s + "\n")
-			f.Write(b)
+			f.Write(cleanedContent)
 			f.WriteString("\n")
 		}
 	}
@@ -402,7 +561,7 @@ func getEnterpriseCertificateName() string {
 	return "EmilyCarrU Intune Windows Enterprise Certificate"
 }
 
-// helper – Authenticode-sign PowerShell scripts in tools/ directory that get packaged
+// helper - Authenticode-sign PowerShell scripts in tools/ directory that get packaged
 // Only signs chocolateyInstall.ps1 and chocolateyBeforeModify.ps1, not original scripts in scripts/ folder
 // Auto-detects enterprise certificate if none specified
 func signPowerShellScripts(projectDir, subject, thumbprint string) error {
