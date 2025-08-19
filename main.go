@@ -508,9 +508,16 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 	if err != nil {
 		return err
 	}
+
+	// Add payload cleanup at the very end of all chocolateyInstall.ps1 scripts
+	f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open script for cleanup append: %w", err)
+	}
+	defer f.Close()
+
+	// Append postinstall scripts BEFORE cleanup
 	if len(post) > 0 {
-		f, _ := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
-		defer f.Close()
 		for _, s := range post {
 			b, _ := os.ReadFile(filepath.Join(projectDir, "scripts", s))
 			// Clean the PowerShell script content to remove problematic directives
@@ -520,13 +527,6 @@ Get-ChildItem -Path $payloadRoot -Recurse | ForEach-Object {
 			f.WriteString("\n")
 		}
 	}
-
-	// Add payload cleanup at the very end of all chocolateyInstall.ps1 scripts
-	f, err := os.OpenFile(scriptPath, os.O_APPEND|os.O_WRONLY, 0600)
-	if err != nil {
-		return fmt.Errorf("failed to open script for cleanup append: %w", err)
-	}
-	defer f.Close()
 
 	// Ensure success exit code for Chocolatey
 	if _, err := f.WriteString("\n# Ensure success exit code for Chocolatey\n$global:LASTEXITCODE = 0\n"); err != nil {
