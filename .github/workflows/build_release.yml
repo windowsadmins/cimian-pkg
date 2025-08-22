@@ -30,7 +30,7 @@ jobs:
         id: set_version
         shell: pwsh
         run: |
-          $version = Get-Date -Format "yyyy.MM.dd"
+          $version = Get-Date -Format "yyyy.MM.dd.HHmm"
           echo "RELEASE_VERSION=$version" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8
 
       - name: Build Binary
