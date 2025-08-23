@@ -144,19 +144,35 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	return &buildInfo, nil
 }
 
-// parseVersion validates and normalizes the version string to a format suitable for Chocolatey.
+// parseVersion validates and normalizes the version string to semantic format (YY.M.D).
+// This ensures consistency since NuGet strips leading zeros anyway.
 func parseVersion(versionStr string) (string, error) {
 	parts := strings.Split(versionStr, ".")
-	var numericParts []string
-
-	for _, part := range parts {
-		if _, err := strconv.Atoi(part); err != nil {
-			return "", fmt.Errorf("invalid version part: %q is not a number", part)
-		}
-		numericParts = append(numericParts, part)
+	if len(parts) != 3 {
+		return "", fmt.Errorf("version must have exactly 3 parts (year.month.day), got %d parts", len(parts))
 	}
 
-	return strings.Join(numericParts, "."), nil
+	var numericParts []int
+	for _, part := range parts {
+		num, err := strconv.Atoi(part)
+		if err != nil {
+			return "", fmt.Errorf("invalid version part: %q is not a number", part)
+		}
+		numericParts = append(numericParts, num)
+	}
+
+	year := numericParts[0]
+	month := numericParts[1]
+	day := numericParts[2]
+
+	// Always convert to 2-digit year semantic format (YY.M.D)
+	// This ensures consistency since NuGet strips leading zeros anyway
+	if year >= 2000 {
+		year = year - 2000 // Convert 2025 -> 25
+	}
+
+	// Semantic format: no leading zeros
+	return fmt.Sprintf("%d.%d.%d", year, month, day), nil
 }
 
 // createProjectDirectory creates the necessary subdirectories in the project directory.
@@ -649,6 +665,7 @@ func signPowerShellScripts(projectDir, subject, thumbprint string) error {
 
 // generateNuspec builds the .nuspec file
 func generateNuspec(buildInfo *BuildInfo, projectDir string) (string, error) {
+	logger.Debug("generateNuspec called with version: %s", buildInfo.Product.Version)
 	nuspecPath := filepath.Join(projectDir, buildInfo.Product.Name+".nuspec")
 
 	description := buildInfo.Product.Description
@@ -1050,10 +1067,16 @@ func main() {
 		logger.Fatal("Error: 'install_location' must be specified when payload exists and the package is not an installer.")
 	}
 
-	// Validate version format
-	if _, err = parseVersion(buildInfo.Product.Version); err != nil {
+	// Validate and normalize version format
+	logger.Debug("Original version from YAML: %s", buildInfo.Product.Version)
+	normalizedVersion, err := parseVersion(buildInfo.Product.Version)
+	if err != nil {
 		logger.Fatal("Error parsing version: %v", err)
 	}
+	logger.Debug("Normalized version: %s", normalizedVersion)
+	// Use the normalized version for all package operations
+	buildInfo.Product.Version = normalizedVersion
+	logger.Debug("BuildInfo version after assignment: %s", buildInfo.Product.Version)
 
 	if err := createProjectDirectory(projectDir); err != nil {
 		logger.Fatal("Error creating directories: %v", err)
