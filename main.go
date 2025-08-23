@@ -144,35 +144,52 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	return &buildInfo, nil
 }
 
-// parseVersion validates and normalizes the version string to semantic format (YY.M.D).
-// This ensures consistency since NuGet strips leading zeros anyway.
+// parseVersion handles version normalization for date-based versions while preserving other formats.
+// Date formats like YYYY.MM.DD or YYYY.MM.DD.HHmm are normalized to semantic format (YY.M.D or YY.M.D.HHmm).
+// All other version formats are passed through unchanged.
 func parseVersion(versionStr string) (string, error) {
 	parts := strings.Split(versionStr, ".")
-	if len(parts) != 3 {
-		return "", fmt.Errorf("version must have exactly 3 parts (year.month.day), got %d parts", len(parts))
-	}
 
-	var numericParts []int
-	for _, part := range parts {
-		num, err := strconv.Atoi(part)
-		if err != nil {
-			return "", fmt.Errorf("invalid version part: %q is not a number", part)
+	// Handle date-based versions: YYYY.MM.DD or YYYY.MM.DD.HHmm
+	if len(parts) == 3 || len(parts) == 4 {
+		// Check if this looks like a date format by validating the first part as a year
+		if yearNum, err := strconv.Atoi(parts[0]); err == nil && yearNum >= 2000 && yearNum <= 2100 {
+			// Validate all parts are numeric for date format
+			var numericParts []int
+			allNumeric := true
+			for _, part := range parts {
+				if num, err := strconv.Atoi(part); err == nil {
+					numericParts = append(numericParts, num)
+				} else {
+					allNumeric = false
+					break
+				}
+			}
+
+			if allNumeric && len(numericParts) >= 3 {
+				year := numericParts[0]
+				month := numericParts[1]
+				day := numericParts[2]
+
+				// Convert to 2-digit year semantic format (YY.M.D or YY.M.D.HHmm)
+				// This ensures consistency since NuGet strips leading zeros anyway
+				if year >= 2000 {
+					year = year - 2000 // Convert 2025 -> 25
+				}
+
+				if len(numericParts) == 4 {
+					// 4-part date version: YY.M.D.HHmm
+					return fmt.Sprintf("%d.%d.%d.%d", year, month, day, numericParts[3]), nil
+				} else {
+					// 3-part date version: YY.M.D
+					return fmt.Sprintf("%d.%d.%d", year, month, day), nil
+				}
+			}
 		}
-		numericParts = append(numericParts, num)
 	}
 
-	year := numericParts[0]
-	month := numericParts[1]
-	day := numericParts[2]
-
-	// Always convert to 2-digit year semantic format (YY.M.D)
-	// This ensures consistency since NuGet strips leading zeros anyway
-	if year >= 2000 {
-		year = year - 2000 // Convert 2025 -> 25
-	}
-
-	// Semantic format: no leading zeros
-	return fmt.Sprintf("%d.%d.%d", year, month, day), nil
+	// For all other version formats (like 25.1, 1.2.3.4, etc.), pass through unchanged
+	return versionStr, nil
 }
 
 // createProjectDirectory creates the necessary subdirectories in the project directory.
