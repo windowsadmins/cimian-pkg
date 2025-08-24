@@ -227,88 +227,21 @@ func cleanPowerShellScript(content []byte) []byte {
 
 	lines := strings.Split(contentStr, "\n")
 	var cleanedLines []string
-	inParamBlock := false
-	braceDepth := 0
-	tryDepth := 0
 
-	for i, line := range lines {
+	for _, line := range lines {
 		// Normalize Unicode characters in each line
 		line = normalizeUnicodeChars(line)
 		trimmed := strings.TrimSpace(line)
 
-		// Skip empty lines
-		if trimmed == "" {
-			cleanedLines = append(cleanedLines, line)
-			continue
-		}
-
-		// Track parameter block boundaries
-		if strings.HasPrefix(trimmed, "param(") {
-			inParamBlock = true
+		// Only remove these 3 specific lines that break PowerShell when not at the start
+		if trimmed == "#Requires -Version 5.0" ||
+			trimmed == "[CmdletBinding()]" ||
+			trimmed == "param()" {
 			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
 			continue
 		}
 
-		// Skip lines inside param blocks
-		if inParamBlock {
-			if strings.Contains(line, "{") {
-				braceDepth++
-			}
-			if strings.Contains(line, "}") {
-				braceDepth--
-				if braceDepth <= 0 {
-					inParamBlock = false
-					braceDepth = 0
-				}
-			}
-			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
-			continue
-		}
-
-		// Skip lines that contain script-level directives that must be at the start
-		if strings.HasPrefix(trimmed, "[CmdletBinding(") ||
-			strings.HasPrefix(trimmed, "[CmdletBinding()]") ||
-			strings.HasPrefix(trimmed, "param(") ||
-			strings.HasPrefix(trimmed, "param()") ||
-			(strings.HasPrefix(trimmed, "param") && strings.Contains(trimmed, "(")) {
-			logger.Debug("Cleaning problematic PowerShell directive: %s", trimmed)
-			continue
-		}
-
-		// Remove duplicate $ErrorActionPreference (keep only first one which is added by our script header)
-		if strings.HasPrefix(trimmed, "$ErrorActionPreference") {
-			logger.Debug("Cleaning duplicate ErrorActionPreference: %s", trimmed)
-			continue
-		}
-
-		// Track try blocks
-		if strings.Contains(trimmed, "try {") {
-			tryDepth++
-		}
-
-		// Handle malformed try-catch constructs
-		if strings.HasPrefix(trimmed, "} catch {") {
-			if tryDepth == 0 {
-				logger.Debug("Cleaning orphaned catch block (no matching try): %s", trimmed)
-				continue
-			}
-			tryDepth--
-		}
-
-		// Handle orphaned closing braces - DISABLED to prevent breaking valid PowerShell
-		// This was too aggressive and removing valid braces
-		_, _ = trimmed, i // Keep the variable usage to avoid compiler warnings
-
-		// Clean up Install-ChocolateyPackage calls that might have syntax errors
-		if strings.Contains(trimmed, "Install-ChocolateyPackage") && strings.Contains(trimmed, " install ") {
-			// Fix parameter syntax - remove extra "install" parameter
-			cleaned := strings.ReplaceAll(trimmed, " install ", " ")
-			cleaned = strings.ReplaceAll(cleaned, " install", "")
-			logger.Debug("Fixing Install-ChocolateyPackage syntax: %s -> %s", trimmed, cleaned)
-			cleanedLines = append(cleanedLines, strings.Replace(line, trimmed, cleaned, 1))
-			continue
-		}
-
+		// Keep everything else - including all the actual installation logic
 		cleanedLines = append(cleanedLines, line)
 	}
 
