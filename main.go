@@ -145,13 +145,14 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 }
 
 // parseVersion handles version normalization for date-based versions while preserving other formats.
-// Date formats like YYYY.MM.DD or YYYY.MM.DD.HHmm are normalized to semantic format (YY.M.D or YY.M.D.HHmm).
+// Date formats like YYYY.MM.DD or YYYY.MM.DD.HHmm are normalized to semantic format (YY.M.D or YY.M.D.HHmm) for .nuspec compatibility.
 // All other version formats are passed through unchanged.
-func parseVersion(versionStr string) (string, error) {
+// Returns both the original version (for filename) and normalized version (for .nuspec).
+func parseVersion(versionStr string) (originalVersion, normalizedVersion string, err error) {
 	parts := strings.Split(versionStr, ".")
 
-	// Handle date-based versions: YYYY.MM.DD or YYYY.MM.DD.HHmm
-	if len(parts) == 3 || len(parts) == 4 {
+	// Handle date-based versions: YYYY.MM.DD or YYYY.MM.DD.HHmm or YYYY.MM.DD.HHMMss
+	if len(parts) >= 3 && len(parts) <= 5 {
 		// Check if this looks like a date format by validating the first part as a year
 		if yearNum, err := strconv.Atoi(parts[0]); err == nil && yearNum >= 2000 && yearNum <= 2100 {
 			// Validate all parts are numeric for date format
@@ -171,25 +172,35 @@ func parseVersion(versionStr string) (string, error) {
 				month := numericParts[1]
 				day := numericParts[2]
 
-				// Convert to 2-digit year semantic format (YY.M.D or YY.M.D.HHmm)
+				// Convert to 2-digit year semantic format (YY.M.D or YY.M.D.HHmm) for .nuspec
 				// This ensures consistency since NuGet strips leading zeros anyway
+				var semanticVersion string
 				if year >= 2000 {
-					year = year - 2000 // Convert 2025 -> 25
-				}
-
-				if len(numericParts) == 4 {
-					// 4-part date version: YY.M.D.HHmm
-					return fmt.Sprintf("%d.%d.%d.%d", year, month, day, numericParts[3]), nil
-				} else {
-					// 3-part date version: YY.M.D
-					return fmt.Sprintf("%d.%d.%d", year, month, day), nil
+					semanticYear := year - 2000 // Convert 2025 -> 25
+					
+					switch len(numericParts) {
+					case 3:
+						// 3-part date version: YY.M.D
+						semanticVersion = fmt.Sprintf("%d.%d.%d", semanticYear, month, day)
+					case 4:
+						// 4-part date version: YY.M.D.HHmm
+						semanticVersion = fmt.Sprintf("%d.%d.%d.%d", semanticYear, month, day, numericParts[3])
+					case 5:
+						// 5-part date version: YY.M.D.HHmm.ss
+						semanticVersion = fmt.Sprintf("%d.%d.%d.%d.%d", semanticYear, month, day, numericParts[3], numericParts[4])
+					default:
+						semanticVersion = versionStr // fallback
+					}
+					
+					// Return original version for filename, semantic version for .nuspec
+					return versionStr, semanticVersion, nil
 				}
 			}
 		}
 	}
 
-	// For all other version formats (like 25.1, 1.2.3.4, etc.), pass through unchanged
-	return versionStr, nil
+	// For all other version formats (like 25.1, 1.2.3.4, etc.), pass through unchanged for both
+	return versionStr, versionStr, nil
 }
 
 // createProjectDirectory creates the necessary subdirectories in the project directory.
@@ -1019,13 +1030,19 @@ func main() {
 
 	// Validate and normalize version format
 	logger.Debug("Original version from YAML: %s", buildInfo.Product.Version)
-	normalizedVersion, err := parseVersion(buildInfo.Product.Version)
+	originalVersion, normalizedVersion, err := parseVersion(buildInfo.Product.Version)
 	if err != nil {
 		logger.Fatal("Error parsing version: %v", err)
 	}
-	logger.Debug("Normalized version: %s", normalizedVersion)
-	// Use the normalized version for all package operations
-	buildInfo.Product.Version = normalizedVersion
+	logger.Debug("Original version (for filename): %s", originalVersion)
+	logger.Debug("Normalized version (for .nuspec): %s", normalizedVersion)
+	
+	// Store both versions for different uses
+	filenameVersion := originalVersion
+	nuspecVersion := normalizedVersion
+	
+	// Use the normalized version for .nuspec compatibility
+	buildInfo.Product.Version = nuspecVersion
 	logger.Debug("BuildInfo version after assignment: %s", buildInfo.Product.Version)
 
 	if err := createProjectDirectory(projectDir); err != nil {
@@ -1060,7 +1077,7 @@ func main() {
 	checkNuGet()
 
 	buildDir := filepath.Join(projectDir, "build")
-	builtPkgName := buildInfo.Product.Name + "-" + buildInfo.Product.Version + ".nupkg"
+	builtPkgName := buildInfo.Product.Name + "-" + filenameVersion + ".nupkg"
 	builtPkgPath := filepath.Join(buildDir, builtPkgName)
 
 	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis", "-NoDefaultExcludes"); err != nil {
