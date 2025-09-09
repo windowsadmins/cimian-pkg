@@ -222,8 +222,18 @@ func createProjectDirectory(projectDir string) error {
 }
 
 // normalizeInstallLocation ensures the install location ends with a backslash
+// and converts single backslash to C:\ for Windows root directory
 func normalizeInstallLocation(path string) string {
 	path = strings.ReplaceAll(path, "/", `\`)
+	
+	// Handle the special case where install_location is just "\" - convert to "C:\"
+	// Also handle whitespace variants
+	trimmedPath := strings.TrimSpace(path)
+	if trimmedPath == `\` {
+		logger.Debug("Normalizing install_location from '%s' to 'C:\\' for proper Windows path handling", path)
+		path = `C:\`
+	}
+	
 	if !strings.HasSuffix(path, `\`) {
 		path += `\`
 	}
@@ -960,7 +970,7 @@ product:
   identifier: com.company.projectname
 postinstall_action: none
 signing_certificate: 
-install_location: \
+install_location: C:\
 `
 
 	buildInfoPath := filepath.Join(projectPath, "build-info.yaml")
