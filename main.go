@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/windowsadmins/cimian-pkg/internal/logging"
 
@@ -59,6 +60,7 @@ type FileRef struct {
 
 var (
 	intuneWinFlag bool
+	envFileFlag   string
 	logger        *logging.Logger
 )
 
@@ -128,6 +130,112 @@ func normalizeUnicodeChars(input string) string {
 	return result
 }
 
+// loadEnvFile loads environment variables from a .env file
+func loadEnvFile(envFilePath string) (map[string]string, error) {
+	envVars := make(map[string]string)
+	
+	if envFilePath == "" {
+		return envVars, nil
+	}
+
+	data, err := os.ReadFile(envFilePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			logger.Debug("Environment file not found: %s", envFilePath)
+			return envVars, nil
+		}
+		return nil, fmt.Errorf("error reading environment file %s: %w", envFilePath, err)
+	}
+
+	lines := strings.Split(string(data), "\n")
+	for lineNum, line := range lines {
+		line = strings.TrimSpace(line)
+		
+		// Skip empty lines and comments
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		// Parse KEY=VALUE or KEY='VALUE' or KEY="VALUE"
+		if strings.Contains(line, "=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				
+				// Remove surrounding quotes if present
+				if (strings.HasPrefix(value, `"`) && strings.HasSuffix(value, `"`)) ||
+				   (strings.HasPrefix(value, `'`) && strings.HasSuffix(value, `'`)) {
+					value = value[1 : len(value)-1]
+				}
+				
+				envVars[key] = value
+				logger.Debug("Loaded environment variable: %s", key)
+			} else {
+				logger.Debug("Skipping malformed line %d in %s: %s", lineNum+1, envFilePath, line)
+			}
+		} else {
+			logger.Debug("Skipping line %d in %s (no '=' found): %s", lineNum+1, envFilePath, line)
+		}
+	}
+
+	logger.Debug("Loaded %d environment variables from %s", len(envVars), envFilePath)
+	return envVars, nil
+}
+
+// mergeEnvironmentVars combines environment variables from multiple sources
+// Priority: .env file > system environment (Cimian-prefixed only)
+func mergeEnvironmentVars(envFileVars map[string]string, includeSysEnv bool) map[string]string {
+	result := make(map[string]string)
+	
+	// Start with system environment if requested
+	if includeSysEnv {
+		for _, env := range os.Environ() {
+			if parts := strings.SplitN(env, "=", 2); len(parts) == 2 {
+				key := parts[0]
+				// Only include Cimian-related environment variables from system
+				if strings.HasPrefix(key, "CIMIAN_") || strings.HasPrefix(key, "Cimian") {
+					result[key] = parts[1]
+				}
+			}
+		}
+	}
+	
+	// Override with .env file variables (highest priority)
+	for key, value := range envFileVars {
+		result[key] = value
+	}
+	
+	return result
+}
+
+// generateEnvironmentVariablesScript creates PowerShell code to set environment variables
+func generateEnvironmentVariablesScript(envVars map[string]string) string {
+	if len(envVars) == 0 {
+		return ""
+	}
+	
+	var sb strings.Builder
+	sb.WriteString("# Set environment variables from build configuration\n")
+	
+	// Sort keys for consistent output
+	keys := make([]string, 0, len(envVars))
+	for key := range envVars {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	
+	for _, key := range keys {
+		value := envVars[key]
+		// Escape single quotes in the value
+		escapedValue := strings.ReplaceAll(value, "'", "''")
+		sb.WriteString(fmt.Sprintf("$env:%s = '%s'\n", key, escapedValue))
+	}
+	
+	sb.WriteString("Write-Verbose \"Environment variables configured for Cimian package\"\n\n")
+	return sb.String()
+}
+
 // readBuildInfo reads and parses the build-info.yaml file from the project directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	path := filepath.Join(projectDir, "build-info.yaml")
@@ -145,8 +253,8 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 }
 
 // parseVersion handles version normalization for date-based versions while preserving other formats.
-// Date formats like YYYY.MM.DD or YYYY.MM.DD.HHmm are normalized to semantic format (YY.M.D or YY.M.D.HHmm) for .nuspec compatibility.
-// All other version formats are passed through unchanged.
+// ONLY converts versions that match current year patterns (e.g., 25.M.D or 25.M.D.HM for 2025).
+// This prevents aggressive conversion of semantic versions that happen to look date-like.
 // Returns both the original version (for filename) and normalized version (for .nuspec).
 func parseVersion(versionStr string) (originalVersion, normalizedVersion string, err error) {
 	parts := strings.Split(versionStr, ".")
@@ -154,46 +262,73 @@ func parseVersion(versionStr string) (originalVersion, normalizedVersion string,
 	// Handle date-based versions: YYYY.MM.DD or YYYY.MM.DD.HHmm or YYYY.MM.DD.HHMMss
 	if len(parts) >= 3 && len(parts) <= 5 {
 		// Check if this looks like a date format by validating the first part as a year
-		if yearNum, err := strconv.Atoi(parts[0]); err == nil && yearNum >= 2000 && yearNum <= 2100 {
-			// Validate all parts are numeric for date format
-			var numericParts []int
-			allNumeric := true
-			for _, part := range parts {
-				if num, err := strconv.Atoi(part); err == nil {
-					numericParts = append(numericParts, num)
-				} else {
-					allNumeric = false
-					break
+		if yearNum, err := strconv.Atoi(parts[0]); err == nil {
+			// Get current year to determine if we should do date conversion
+			currentYear := time.Now().Year()
+			currentYearShort := currentYear - 2000 // Convert 2025 -> 25
+			
+			isCurrentYearDateFormat := false
+			
+			// Only convert if it matches current year patterns:
+			// 1. Full current year (e.g., 2025.M.D)
+			// 2. Current year short form (e.g., 25.M.D)
+			if yearNum == currentYear {
+				isCurrentYearDateFormat = true
+			} else if yearNum == currentYearShort && len(parts) >= 3 {
+				// Additional validation for 2-digit year: check if month and day parts are date-like
+				if monthNum, err := strconv.Atoi(parts[1]); err == nil && monthNum >= 1 && monthNum <= 12 {
+					if dayNum, err := strconv.Atoi(parts[2]); err == nil && dayNum >= 1 && dayNum <= 31 {
+						isCurrentYearDateFormat = true
+					}
 				}
 			}
 
-			if allNumeric && len(numericParts) >= 3 {
-				year := numericParts[0]
-				month := numericParts[1]
-				day := numericParts[2]
-
-				// Convert to 2-digit year semantic format (YY.M.D or YY.M.D.HHmm) for .nuspec
-				// This ensures consistency since NuGet strips leading zeros anyway
-				var semanticVersion string
-				if year >= 2000 {
-					semanticYear := year - 2000 // Convert 2025 -> 25
-					
-					switch len(numericParts) {
-					case 3:
-						// 3-part date version: YY.M.D
-						semanticVersion = fmt.Sprintf("%d.%d.%d", semanticYear, month, day)
-					case 4:
-						// 4-part date version: YY.M.D.HHmm
-						semanticVersion = fmt.Sprintf("%d.%d.%d.%d", semanticYear, month, day, numericParts[3])
-					case 5:
-						// 5-part date version: YY.M.D.HHmm.ss
-						semanticVersion = fmt.Sprintf("%d.%d.%d.%d.%d", semanticYear, month, day, numericParts[3], numericParts[4])
-					default:
-						semanticVersion = versionStr // fallback
+			if isCurrentYearDateFormat {
+				// Validate all parts are numeric for date format
+				var numericParts []int
+				allNumeric := true
+				for _, part := range parts {
+					if num, err := strconv.Atoi(part); err == nil {
+						numericParts = append(numericParts, num)
+					} else {
+						allNumeric = false
+						break
 					}
-					
-					// Return original version for filename, semantic version for .nuspec
-					return versionStr, semanticVersion, nil
+				}
+
+				if allNumeric && len(numericParts) >= 3 {
+					year := numericParts[0]
+					month := numericParts[1]
+					day := numericParts[2]
+
+					// Convert 2-digit year to 4-digit year (handle current year only)
+					if year < 100 {
+						year = currentYear // Always use current year for 2-digit years
+					}
+
+					// Convert to 2-digit year semantic format (YY.M.D or YY.M.D.HHmm) for .nuspec
+					// This ensures consistency since NuGet strips leading zeros anyway
+					var semanticVersion string
+					if year >= 2000 {
+						semanticYear := year - 2000 // Convert 2025 -> 25
+						
+						switch len(numericParts) {
+						case 3:
+							// 3-part date version: YY.M.D
+							semanticVersion = fmt.Sprintf("%d.%d.%d", semanticYear, month, day)
+						case 4:
+							// 4-part date version: YY.M.D.HHmm
+							semanticVersion = fmt.Sprintf("%d.%d.%d.%d", semanticYear, month, day, numericParts[3])
+						case 5:
+							// 5-part date version: YY.M.D.HHmm.ss
+							semanticVersion = fmt.Sprintf("%d.%d.%d.%d.%d", semanticYear, month, day, numericParts[3], numericParts[4])
+						default:
+							semanticVersion = versionStr // fallback
+						}
+						
+						// Return original version for filename, semantic version for .nuspec
+						return versionStr, semanticVersion, nil
+					}
 				}
 			}
 		}
@@ -358,7 +493,7 @@ func getPostinstallScripts(projectDir string) ([]string, error) {
 //
 // The generated file now starts with the same header we use in
 // chocolateyInstall.ps1 so behaviour (-Stop, UTF-8, logging) is identical.
-func includePreinstallScripts(projectDir string) error {
+func includePreinstallScripts(projectDir string, envVars map[string]string) error {
 	preScripts, err := getPreinstallScripts(projectDir)
 	if err != nil {
 		return err
@@ -378,6 +513,12 @@ func includePreinstallScripts(projectDir string) error {
 	sb.WriteString("if (-not $env:CIMIAN_PRE_DONE) {\n")
 	sb.WriteString("    Write-Verbose 'Running chocolateyBeforeModify.ps1'\n")
 	sb.WriteString("}\n\n")
+	
+	// ── inject environment variables ────────────────────────────────────
+	envScript := generateEnvironmentVariablesScript(envVars)
+	if envScript != "" {
+		sb.WriteString(envScript)
+	}
 
 	// ── append each preinstall*.ps1 in lexical order ────────────────────
 	for _, script := range preScripts {
@@ -403,7 +544,7 @@ func includePreinstallScripts(projectDir string) error {
 //   - If InstallerTypePayload == true we launch the embedded installer in place.
 //   - Otherwise we copy the payload tree to InstallLocation, *using -LiteralPath*
 //     to handle filenames containing [, ], *, ? etc.
-func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPkg bool, hasPayload bool) error {
+func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPkg bool, hasPayload bool, envVars map[string]string) error {
 	scriptPath := filepath.Join(projectDir, "tools", "chocolateyInstall.ps1")
 
 	var sb strings.Builder
@@ -411,6 +552,13 @@ func createChocolateyInstallScript(bi *BuildInfo, projectDir string, installerPk
 
 	// Add initial $ErrorActionPreference only once
 	sb.WriteString("$ErrorActionPreference = 'Stop'\n\n")
+	
+	// ── inject environment variables first ──────────────────────────────────
+	envScript := generateEnvironmentVariablesScript(envVars)
+	if envScript != "" {
+		sb.WriteString(envScript)
+	}
+	
 	// seenErrorActionPreference = true	// ── declare common variables that pre-install scripts might need ────────
 	sb.WriteString("# Variables available to pre-install scripts:\n")
 	sb.WriteString("$payloadDir = Join-Path $PSScriptRoot '..\\payload'\n")
@@ -978,6 +1126,28 @@ install_location: C:\
 		return fmt.Errorf("failed to create build-info.yaml: %w", err)
 	}
 
+	// Create .env.example template
+	envExampleTemplate := `# Cimian Environment Variables
+# Copy this file to .env and configure your actual values
+# The .env file should be added to .gitignore to keep credentials secure
+
+# Basic Authentication (if using CimianAuth)
+# CimianAuthHeader='your_base64_encoded_auth_header'
+# CimianManifestApiKey='your_api_key'
+
+# Domain Rename Service Account (if using device rename functionality)
+# CimianRenameUser='DOMAIN\service_account'
+# CimianRenamePass='service_account_password'
+
+# Custom environment variables for your scripts
+# CUSTOM_VAR='custom_value'
+`
+
+	envExamplePath := filepath.Join(projectPath, ".env.example")
+	if err := os.WriteFile(envExamplePath, []byte(envExampleTemplate), 0644); err != nil {
+		return fmt.Errorf("failed to create .env.example: %w", err)
+	}
+
 	return nil
 }
 
@@ -989,6 +1159,7 @@ func main() {
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg")
 	flag.StringVar(&createPath, "create", "", "Create a new project structure at the specified path")
+	flag.StringVar(&envFileFlag, "env", "", "Path to .env file containing environment variables to inject into scripts")
 	flag.Parse()
 
 	setupLogging(verbose)
@@ -1004,7 +1175,7 @@ func main() {
 	}
 
 	if flag.NArg() < 1 {
-		logger.Fatal("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH", os.Args[0])
+		logger.Fatal("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH\n  -env FILE     path to .env file with environment variables", os.Args[0])
 	}
 	projectDir := NormalizePath(flag.Arg(0))
 
@@ -1024,6 +1195,29 @@ func main() {
 	buildInfo, err := readBuildInfo(projectDir)
 	if err != nil {
 		logger.Fatal("Error reading build-info.yaml: %v", err)
+	}
+	
+	// Load environment variables from .env file if specified
+	// Auto-detect .env file in project directory if no explicit path provided
+	envFilePath := envFileFlag
+	if envFilePath == "" {
+		// Try to auto-detect .env file in the project directory
+		candidateEnvFile := filepath.Join(projectDir, ".env")
+		if _, err := os.Stat(candidateEnvFile); err == nil {
+			envFilePath = candidateEnvFile
+			logger.Debug("Auto-detected .env file: %s", envFilePath)
+		}
+	}
+	
+	envFileVars, err := loadEnvFile(envFilePath)
+	if err != nil {
+		logger.Fatal("Error loading environment file: %v", err)
+	}
+	
+	// Merge environment variables from all sources
+	mergedEnvVars := mergeEnvironmentVars(envFileVars, true)
+	if len(mergedEnvVars) > 0 {
+		logger.Success("Loaded %d environment variables for script injection", len(mergedEnvVars))
 	}
 
 	payloadPath := filepath.Join(projectDir, "payload")
@@ -1061,12 +1255,12 @@ func main() {
 	logger.Success("Directories created successfully.")
 
 	// Include all preinstall scripts
-	if err := includePreinstallScripts(projectDir); err != nil {
+	if err := includePreinstallScripts(projectDir, mergedEnvVars); err != nil {
 		logger.Fatal("Error including preinstall scripts: %v", err)
 	}
 
 	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
-	if err := createChocolateyInstallScript(buildInfo, projectDir, installerPkg, hasPayloadFiles); err != nil {
+	if err := createChocolateyInstallScript(buildInfo, projectDir, installerPkg, hasPayloadFiles, mergedEnvVars); err != nil {
 		logger.Fatal("Error generating chocolateyInstall.ps1: %v", err)
 	}
 
