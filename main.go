@@ -1127,10 +1127,10 @@ install_location: C:\
 		return fmt.Errorf("failed to create build-info.yaml: %w", err)
 	}
 
-	// Create .env.example template
-	envExampleTemplate := `# Cimian Environment Variables
-# Copy this file to .env and configure your actual values
-# The .env file should be added to .gitignore to keep credentials secure
+	// Create .env template
+	envTemplate := `# Cimian Environment Variables
+# Configure your actual values for package building
+# This file contains environment variables that will be injected into scripts
 
 # Basic Authentication (if using CimianAuth)
 # CimianAuthHeader='your_base64_encoded_auth_header'
@@ -1144,9 +1144,9 @@ install_location: C:\
 # CUSTOM_VAR='custom_value'
 `
 
-	envExamplePath := filepath.Join(projectPath, ".env.example")
-	if err := os.WriteFile(envExamplePath, []byte(envExampleTemplate), 0644); err != nil {
-		return fmt.Errorf("failed to create .env.example: %w", err)
+	envPath := filepath.Join(projectPath, ".env")
+	if err := os.WriteFile(envPath, []byte(envTemplate), 0644); err != nil {
+		return fmt.Errorf("failed to create .env: %w", err)
 	}
 
 	return nil
