@@ -61,6 +61,7 @@ type FileRef struct {
 var (
 	intuneWinFlag bool
 	envFileFlag   string
+	nupkgFlag     bool
 	logger        *logging.Logger
 )
 
@@ -1151,13 +1152,191 @@ install_location: C:\
 	return nil
 }
 
+// buildPkgPackage creates a .pkg file (ZIP archive) with the sbin-installer structure
+func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string) (string, error) {
+	buildDir := filepath.Join(projectDir, "build")
+	pkgName := buildInfo.Product.Name + "-" + filenameVersion + ".pkg"
+	pkgPath := filepath.Join(buildDir, pkgName)
+
+	logger.Printf("Creating .pkg package: %s", pkgName)
+
+	// Create a temporary directory for building the package structure
+	tempDir, err := os.MkdirTemp("", "cimipkg_pkg_*")
+	if err != nil {
+		return "", fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// Copy payload directory if it exists
+	payloadSrc := filepath.Join(projectDir, "payload")
+	if _, err := os.Stat(payloadSrc); !os.IsNotExist(err) {
+		payloadDst := filepath.Join(tempDir, "payload")
+		if err := copyDirectory(payloadSrc, payloadDst); err != nil {
+			return "", fmt.Errorf("failed to copy payload directory: %w", err)
+		}
+		logger.Debug("Copied payload directory to temp package structure")
+	}
+
+	// Copy scripts directory if it exists
+	scriptsSrc := filepath.Join(projectDir, "scripts")
+	if _, err := os.Stat(scriptsSrc); !os.IsNotExist(err) {
+		scriptsDst := filepath.Join(tempDir, "scripts")
+		if err := copyDirectory(scriptsSrc, scriptsDst); err != nil {
+			return "", fmt.Errorf("failed to copy scripts directory: %w", err)
+		}
+		logger.Debug("Copied scripts directory to temp package structure")
+	}
+
+	// Copy build-info.yaml to the package
+	buildInfoSrc := filepath.Join(projectDir, "build-info.yaml")
+	buildInfoDst := filepath.Join(tempDir, "build-info.yaml")
+	if err := copyFile(buildInfoSrc, buildInfoDst); err != nil {
+		return "", fmt.Errorf("failed to copy build-info.yaml: %w", err)
+	}
+	logger.Debug("Copied build-info.yaml to temp package structure")
+
+	// Create the .pkg file as a ZIP archive
+	if err := createZipArchive(tempDir, pkgPath); err != nil {
+		return "", fmt.Errorf("failed to create .pkg archive: %w", err)
+	}
+
+	logger.Success(".pkg package created successfully: %s", pkgPath)
+	return pkgPath, nil
+}
+
+// copyDirectory recursively copies a directory from src to dst
+func copyDirectory(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Calculate the relative path
+		relPath, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+
+		// Calculate the destination path
+		dstPath := filepath.Join(dst, relPath)
+
+		if info.IsDir() {
+			// Create directory
+			return os.MkdirAll(dstPath, info.Mode())
+		} else {
+			// Copy file
+			return copyFile(path, dstPath)
+		}
+	})
+}
+
+// createZipArchive creates a ZIP archive from the source directory
+func createZipArchive(sourceDir, zipPath string) error {
+	// Ensure the destination directory exists
+	if err := os.MkdirAll(filepath.Dir(zipPath), os.ModePerm); err != nil {
+		return fmt.Errorf("failed to create destination directory: %w", err)
+	}
+
+	// Use PowerShell's Compress-Archive cmdlet for reliable ZIP creation
+	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", fmt.Sprintf(
+		"Import-Module Microsoft.PowerShell.Archive -Force; Compress-Archive -Path '%s\\*' -DestinationPath '%s' -Force",
+		sourceDir, zipPath))
+	
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	
+	if err := cmd.Run(); err != nil {
+		return fmt.Errorf("failed to create ZIP archive: %w", err)
+	}
+
+	return nil
+}
+
+// buildNupkgPackage creates a traditional .nupkg file using the existing logic
+func buildNupkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string, installerPkg, hasPayloadFiles bool, mergedEnvVars map[string]string) (string, error) {
+	logger.Printf("Creating .nupkg package (legacy Chocolatey format)")
+
+	if err := createProjectDirectory(projectDir); err != nil {
+		return "", fmt.Errorf("error creating directories: %w", err)
+	}
+
+	// Include all preinstall scripts
+	if err := includePreinstallScripts(projectDir, mergedEnvVars); err != nil {
+		return "", fmt.Errorf("error including preinstall scripts: %w", err)
+	}
+
+	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
+	if err := createChocolateyInstallScript(buildInfo, projectDir, installerPkg, hasPayloadFiles, mergedEnvVars); err != nil {
+		return "", fmt.Errorf("error generating chocolateyInstall.ps1: %w", err)
+	}
+
+	// Sign PowerShell scripts in tools directory if signing cert is specified
+	if buildInfo.SigningCertificate != "" || buildInfo.SigningThumbprint != "" {
+		if err := signPowerShellScripts(projectDir, buildInfo.SigningCertificate, buildInfo.SigningThumbprint); err != nil {
+			return "", fmt.Errorf("error signing PowerShell scripts: %w", err)
+		}
+	}
+
+	nuspecPath, err := generateNuspec(buildInfo, projectDir)
+	if err != nil {
+		return "", fmt.Errorf("error generating .nuspec: %w", err)
+	}
+	defer os.Remove(nuspecPath)
+	logger.Success(".nuspec generated at: %s", nuspecPath)
+
+	checkNuGet()
+
+	buildDir := filepath.Join(projectDir, "build")
+	builtPkgName := buildInfo.Product.Name + "-" + filenameVersion + ".nupkg"
+	builtPkgPath := filepath.Join(buildDir, builtPkgName)
+
+	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis", "-NoDefaultExcludes"); err != nil {
+		return "", fmt.Errorf("error creating package: %w", err)
+	}
+
+	searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
+	matches, _ := filepath.Glob(searchPattern)
+
+	var finalPkgPath string
+	if len(matches) > 0 {
+		logger.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
+		if err := os.Rename(matches[0], builtPkgPath); err != nil {
+			return "", fmt.Errorf("failed to rename package: %w", err)
+		}
+		finalPkgPath = builtPkgPath
+	} else {
+		logger.Printf("Package matching pattern not found, using: %s", builtPkgPath)
+		finalPkgPath = builtPkgPath
+	}
+
+	// Sign if specified
+	if buildInfo.SigningCertificate != "" {
+		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
+			return "", fmt.Errorf("failed to sign package %s: %w", finalPkgPath, err)
+		}
+	} else {
+		logger.Printf("No signing certificate provided. Skipping signing.")
+	}
+
+	// Optional: remove the tools directory
+	toolsDir := filepath.Join(projectDir, "tools")
+	if err := os.RemoveAll(toolsDir); err != nil {
+		logger.Debug("Warning: Failed to remove tools directory: %v", err)
+	} else {
+		logger.Success("Tools directory removed successfully.")
+	}
+
+	return finalPkgPath, nil
+}
+
 func main() {
 	var (
 		verbose    bool
 		createPath string
 	)
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
-	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg")
+	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg (only works with --nupkg)")
+	flag.BoolVar(&nupkgFlag, "nupkg", false, "Build legacy .nupkg format (default is .pkg)")
 	flag.StringVar(&createPath, "create", "", "Create a new project structure at the specified path")
 	flag.StringVar(&envFileFlag, "env", "", "Path to .env file containing environment variables to inject into scripts")
 	flag.Parse()
@@ -1175,7 +1354,7 @@ func main() {
 	}
 
 	if flag.NArg() < 1 {
-		logger.Fatal("Usage: %s [options] <project_directory>\n  -intunewin    optional flag to build a .intunewin from the .nupkg\n  -create PATH  create a new project structure at PATH\n  -env FILE     path to .env file with environment variables", os.Args[0])
+		logger.Fatal("Usage: %s [options] <project_directory>\n  -nupkg        build legacy .nupkg format (default is .pkg)\n  -intunewin    build .intunewin from .nupkg (only works with --nupkg)\n  -create PATH  create a new project structure at PATH\n  -env FILE     path to .env file with environment variables", os.Args[0])
 	}
 	projectDir := NormalizePath(flag.Arg(0))
 
@@ -1249,86 +1428,48 @@ func main() {
 	buildInfo.Product.Version = nuspecVersion
 	logger.Debug("BuildInfo version after assignment: %s", buildInfo.Product.Version)
 
-	if err := createProjectDirectory(projectDir); err != nil {
-		logger.Fatal("Error creating directories: %v", err)
-	}
-	logger.Success("Directories created successfully.")
-
-	// Include all preinstall scripts
-	if err := includePreinstallScripts(projectDir, mergedEnvVars); err != nil {
-		logger.Fatal("Error including preinstall scripts: %v", err)
-	}
-
-	// Create chocolateyInstall.ps1 (and optionally copy payload / append postinstall scripts)
-	if err := createChocolateyInstallScript(buildInfo, projectDir, installerPkg, hasPayloadFiles, mergedEnvVars); err != nil {
-		logger.Fatal("Error generating chocolateyInstall.ps1: %v", err)
-	}
-
-	// Sign PowerShell scripts in tools directory if signing cert is specified
-	if buildInfo.SigningCertificate != "" || buildInfo.SigningThumbprint != "" {
-		if err := signPowerShellScripts(projectDir, buildInfo.SigningCertificate, buildInfo.SigningThumbprint); err != nil {
-			logger.Fatal("Error signing PowerShell scripts: %v", err)
-		}
-	}
-
-	nuspecPath, err := generateNuspec(buildInfo, projectDir)
-	if err != nil {
-		logger.Fatal("Error generating .nuspec: %v", err)
-	}
-	defer os.Remove(nuspecPath)
-	logger.Success(".nuspec generated at: %s", nuspecPath)
-
-	checkNuGet()
-
-	buildDir := filepath.Join(projectDir, "build")
-	builtPkgName := buildInfo.Product.Name + "-" + filenameVersion + ".nupkg"
-	builtPkgPath := filepath.Join(buildDir, builtPkgName)
-
-	if err := runCommand("nuget", "pack", nuspecPath, "-OutputDirectory", buildDir, "-NoPackageAnalysis", "-NoDefaultExcludes"); err != nil {
-		logger.Fatal("Error creating package: %v", err)
-	}
-
-	searchPattern := filepath.Join(buildDir, buildInfo.Product.Identifier+"*.nupkg")
-	matches, _ := filepath.Glob(searchPattern)
-
+	// Determine package format and build accordingly
 	var finalPkgPath string
-	if len(matches) > 0 {
-		logger.Printf("Renaming package: %s to %s", matches[0], builtPkgPath)
-		if err := os.Rename(matches[0], builtPkgPath); err != nil {
-			logger.Fatal("Failed to rename package: %v", err)
+	
+	if nupkgFlag {
+		// Build legacy .nupkg format
+		logger.Printf("Building legacy .nupkg format (Chocolatey compatible)")
+		finalPkgPath, err = buildNupkgPackage(buildInfo, projectDir, filenameVersion, installerPkg, hasPayloadFiles, mergedEnvVars)
+		if err != nil {
+			logger.Fatal("Error building .nupkg package: %v", err)
 		}
-		finalPkgPath = builtPkgPath
-	} else {
-		logger.Printf("Package matching pattern not found, using: %s", builtPkgPath)
-		finalPkgPath = builtPkgPath
-	}
-
-	// Sign if specified
-	if buildInfo.SigningCertificate != "" {
-		if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
-			logger.Fatal("Failed to sign package %s: %v", finalPkgPath, err)
+		
+		// If -intunewin was passed, generate the .intunewin (only works with .nupkg)
+		if intuneWinFlag {
+			logger.Printf("User requested .intunewin generation. Wrapping .nupkg into .intunewin ...")
+			if err := buildIntuneWin(finalPkgPath); err != nil {
+				logger.Fatal("Failed to build .intunewin: %v", err)
+			}
 		}
 	} else {
-		logger.Printf("No signing certificate provided. Skipping signing.")
-	}
-
-	// Optional: remove the tools directory
-	toolsDir := filepath.Join(projectDir, "tools")
-	if err := os.RemoveAll(toolsDir); err != nil {
-		logger.Warning("Warning: Failed to remove tools directory: %v", err)
-	} else {
-		logger.Success("Tools directory removed successfully.")
+		// Build new .pkg format (default)
+		logger.Printf("Building .pkg format (sbin-installer compatible)")
+		finalPkgPath, err = buildPkgPackage(buildInfo, projectDir, filenameVersion)
+		if err != nil {
+			logger.Fatal("Error building .pkg package: %v", err)
+		}
+		
+		// .intunewin generation doesn't make sense for .pkg files
+		if intuneWinFlag {
+			logger.Warning("Warning: --intunewin flag is only supported with --nupkg format. Ignoring.")
+		}
+		
+		// Sign the .pkg file if certificate is specified
+		if buildInfo.SigningCertificate != "" {
+			if err := signPackage(finalPkgPath, buildInfo.SigningCertificate); err != nil {
+				logger.Fatal("Failed to sign package %s: %v", finalPkgPath, err)
+			}
+		} else {
+			logger.Printf("No signing certificate provided. Skipping signing.")
+		}
 	}
 
 	logger.Success("Package created successfully: %s", finalPkgPath)
-
-	// If -intunewin was passed, generate the .intunewin
-	if intuneWinFlag {
-		logger.Printf("User requested .intunewin generation. Wrapping .nupkg into .intunewin ...")
-		if err := buildIntuneWin(finalPkgPath); err != nil {
-			logger.Fatal("Failed to build .intunewin: %v", err)
-		}
-	}
 
 	logger.Success("Done.")
 }
