@@ -271,11 +271,17 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	return &buildInfo, nil
 }
 
-// parseVersion handles version normalization for date-based versions while preserving other formats.
-// ONLY converts versions that match current year patterns (e.g., 25.M.D or 25.M.D.HM for 2025).
-// This prevents aggressive conversion of semantic versions that happen to look date-like.
-// Returns both the original version (for filename) and normalized version (for .nuspec).
-func parseVersion(versionStr string) (originalVersion, normalizedVersion string, err error) {
+// parseVersion handles version normalization intelligently based on package type.
+// For .pkg packages: Pass through any version format unchanged (YYYY.MM.DD, YYYY.MM.DD.HHMM, semantic versions, etc.)
+// For .nupkg packages: Convert date-based versions to semantic format for NuGet compatibility
+// Returns both the original version (for filename) and target version (for package metadata).
+func parseVersion(versionStr string, packageFormat string) (originalVersion, targetVersion string, err error) {
+	// For .pkg packages, use the version as-is since sbin-installer handles any format
+	if packageFormat == "pkg" {
+		return versionStr, versionStr, nil
+	}
+
+	// For .nupkg packages, we need semantic version compatibility for current year date-based versions
 	parts := strings.Split(versionStr, ".")
 
 	// Handle date-based versions: YYYY.MM.DD or YYYY.MM.DD.HHmm or YYYY.MM.DD.HHMMss
@@ -1723,7 +1729,14 @@ func main() {
 
 	// Validate and normalize version format
 	logger.Debug("Original version from YAML: %s", buildInfo.Product.Version)
-	originalVersion, normalizedVersion, err := parseVersion(buildInfo.Product.Version)
+	
+	// Determine package format for version handling
+	packageFormat := "pkg"
+	if nupkgFlag {
+		packageFormat = "nupkg"
+	}
+	
+	originalVersion, normalizedVersion, err := parseVersion(buildInfo.Product.Version, packageFormat)
 	if err != nil {
 		logger.Fatal("Error parsing version: %v", err)
 	}
