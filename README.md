@@ -1,23 +1,34 @@
 ## cimipkg
 
-`cimipkg` is a tool for building `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It leverages **NuGet** for package creation and **Chocolatey** (or **Cimian**) for deployment, with support for **pre- and post-installation scripts** and **code signing**.
+`cimipkg` is a tool for building modern `.pkg` packages and legacy `.nupkg` packages for deploying software on Windows in a consistent, repeatable manner. It supports **sbin-installer** for .pkg packages and **Chocolatey** for .nupkg packages, with comprehensive **pre- and post-installation scripts** and **cryptographic package signing**.
 
-This tool simplifies the complexities of deployment by abstracting YAML-based configuration and script-based actions and offers **flexible certificate signing** using Windows `SignTool`.
+This tool simplifies deployment complexities by providing YAML-based configuration, script-based actions, and **NuGet-style cryptographic signing** for package integrity verification.
+
+### Package Formats
+
+- **`.pkg` (default)**: Modern ZIP-based packages compatible with **sbin-installer**
+  - Cryptographic signature metadata embedded in `build-info.yaml`
+  - Deterministic installations with full integrity verification
+  - Direct script execution without dependency overhead
+- **`.nupkg` (legacy)**: Traditional NuGet packages compatible with **Chocolatey**
+  - NuGet package-level cryptographic signing
+  - Full Chocolatey ecosystem compatibility
+  - Use `--nupkg` flag to build this format
 
 ### Features
 
-- **Dynamic File Inclusion** – everything in `payload/` is packaged automatically.
-- **Script Support** – unlimited `preinstall*.ps1` and `postinstall*.ps1`, run elevated.
+- **Dual Package Format Support** – Build modern `.pkg` or legacy `.nupkg` packages
+- **Cryptographic Signing** – NuGet-style signature metadata for package integrity
+- **Dynamic File Inclusion** – everything in `payload/` is packaged automatically
+- **Script Support** – unlimited `preinstall*.ps1` and `postinstall*.ps1`, run elevated
 - **Smart Copy / In-Place Install** –  
-  • If `install_location` **has a value**, payload files are copied there.  
+  • If `install_location` **has a value**, payload files are copied there  
   • If `install_location` **is empty**, cimipkg assumes the payload contains a
     vendor installer (embedded `setup.exe`, etc.) and runs it **in-place**
-    from `C:\ProgramData\chocolatey\lib\<pkg>\payload` (no second copy to `%TEMP%`).
-- **Post-Install Actions** – optional `logout` or `restart` after install.
-- **Package Signing** – signs the `.nupkg` with `SignTool` or `nuget sign`.
-- **Automatic `readme.md`** – created only when `description` is present.
-- **One-Shot `.intunewin` Build** – add `-intunewin` to wrap the `.nupkg`
-  for Microsoft Intune.
+- **Post-Install Actions** – optional `logout` or `restart` after install
+- **Package Signing** – signs PowerShell scripts and creates package integrity metadata
+- **Automatic `readme.md`** – created only when `description` is present
+- **One-Shot `.intunewin` Build** – add `-intunewin` with `--nupkg` to wrap for Microsoft Intune
 
 ### Prerequisites
 
@@ -38,6 +49,39 @@ Clone the repository:
 git clone https://github.com/rodchristiansen/cimian-pkg.git
 cd cimian-pkg
 ```
+
+### Usage
+
+```bash
+# Build a modern .pkg package (default)
+cimipkg -v 1.2.3 [-sign] [-thumbprint XXXX]
+
+# Build a legacy .nupkg package for Chocolatey
+cimipkg -v 1.2.3 --nupkg [-sign] [-thumbprint XXXX]
+
+# Create Intune package (requires --nupkg)
+cimipkg -v 1.2.3 --nupkg -intunewin
+
+# Build and sign with specific certificate thumbprint
+cimipkg -v 1.2.3 -sign -thumbprint "A1B2C3D4E5F6789012345678901234567890ABCD"
+
+# Build without signing
+cimipkg -v 1.2.3 -nosign
+```
+
+#### Package Format Selection
+
+- **Default behavior**: Creates `.pkg` packages for **sbin-installer**
+- **Legacy mode**: Use `--nupkg` flag to create traditional `.nupkg` packages for **Chocolatey**
+
+#### Command Line Options
+
+- `-v 1.2.3`: The version of the package
+- `--nupkg`: Build legacy .nupkg package instead of modern .pkg
+- `-sign`: (Optional) Sign PowerShell scripts and create package integrity metadata
+- `-thumbprint XXXX`: (Optional) Specify a certificate thumbprint for signing
+- `-nosign`: (Optional) Skip signing even if certificates are available
+- `-intunewin`: (Optional) Create an `.intunewin` wrapper for Microsoft Intune (requires --nupkg)
 
 ### Folder Structure for Packages
 
@@ -308,3 +352,94 @@ postinstall_action: none
 ```
 
 This package runs the `preinstall.ps1` and `postinstall.ps1` scripts without copying any files. It is ideal for tasks like configuring system settings or running maintenance scripts.
+
+## Cryptographic Package Signing
+
+`cimipkg` supports **NuGet-style cryptographic signing** that embeds signature metadata directly in the package's `build-info.yaml` file. This provides package integrity verification without requiring external signature files.
+
+### Signing Process
+
+When the `-sign` flag is used, `cimipkg` performs the following steps:
+
+1. **Content Hashing** - Calculates SHA256 hashes of all payload files and PowerShell scripts
+2. **Package Hash Generation** - Creates a deterministic hash of the entire package contents
+3. **Certificate Integration** - Uses Windows Certificate Store (same certificates as SignTool)
+4. **Cryptographic Signing** - Signs the package hash using RSA-SHA256
+5. **Metadata Embedding** - Embeds complete signature metadata in `build-info.yaml`
+
+### Signature Metadata Structure
+
+The signature is embedded in the `build-info.yaml` as a `signature` section:
+
+```yaml
+signature:
+  algorithm: "SHA256withRSA"
+  certificate:
+    subject: "CN=Company Name, O=Organization, C=US"
+    issuer: "CN=Certificate Authority"
+    thumbprint: "A1B2C3D4E5F6789012345678901234567890ABCD"
+    serial_number: "1234567890ABCDEF"
+    not_before: "2024-01-01T00:00:00Z"
+    not_after: "2025-12-31T23:59:59Z"
+  package_hash: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  content_hash: "a665a45920422f9d417e4867efdc4fb8a04a1f3fff1fa07e998e86f7f7a27ae3"
+  signed_hash: "6b86b273ff34fce19d6b804eff5a3f5747ada4eaa22f1d49c01e52ddb7875b4b"
+  timestamp: "2024-12-20T10:30:45Z"
+  version: "1.0"
+```
+
+### Certificate Requirements
+
+- **Windows Certificate Store** - Certificates must be installed in the current user's personal certificate store
+- **Code Signing Capability** - Certificates must have the "Code Signing" enhanced key usage
+- **Private Key Access** - Private key must be available for signing operations
+- **SignTool Compatibility** - Uses the same certificate infrastructure as Windows SignTool
+
+### Signature Verification
+
+Package integrity can be verified by:
+
+1. **Extracting signature metadata** from `build-info.yaml`
+2. **Recalculating content hashes** of payload files and scripts
+3. **Verifying signed hash** using the certificate public key
+4. **Checking certificate validity** and trust chain
+5. **Comparing timestamp** against certificate validity period
+
+### Format-Specific Signing Behavior
+
+#### .pkg Packages (Modern)
+- Signature metadata embedded in `build-info.yaml` inside the ZIP
+- No external signature files required
+- Compatible with **sbin-installer** verification
+- Supports deterministic package verification
+
+#### .nupkg Packages (Legacy)  
+- Uses traditional NuGet package signing (`nuget sign`)
+- Creates external `.signature.p7s` signature file
+- Compatible with **Chocolatey** and **NuGet** verification
+- Follows NuGet package signing standards
+
+### Certificate Auto-Discovery
+
+`cimipkg` automatically discovers suitable certificates:
+
+1. **Search Personal Store** - Looks in current user's personal certificate store
+2. **Filter by Usage** - Only considers certificates with "Code Signing" capability
+3. **Check Private Key** - Verifies private key is available and accessible
+4. **Select Best Match** - Chooses certificate with longest validity period
+
+Override automatic selection with `-thumbprint` parameter:
+
+```bash
+cimipkg -v 1.2.3 -sign -thumbprint "A1B2C3D4E5F6789012345678901234567890ABCD"
+```
+
+### Verification Integration
+
+The embedded signature metadata enables:
+
+- **sbin-installer** package integrity verification
+- **Enterprise deployment** with cryptographic assurance  
+- **Supply chain security** through certificate validation
+- **Tamper detection** via content hash verification
+- **Audit trails** with timestamp and certificate information
