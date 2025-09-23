@@ -149,6 +149,57 @@ func normalizeUnicodeChars(input string) string {
 	return result
 }
 
+// replacePlaceholders replaces any placeholders in content with environment variable values
+// Supports patterns like: PLACEHOLDER_NAME -> looks for env var PLACEHOLDER_NAME
+// Also supports common patterns like: SOME_VAR_PLACEHOLDER -> looks for env var SOME_VAR
+func replacePlaceholders(content string, envVars map[string]string) string {
+	result := content
+	replacements := 0
+	
+	// Replace any environment variable that has a corresponding placeholder
+	for envKey, envValue := range envVars {
+		if envValue == "" {
+			continue
+		}
+		
+		// Direct replacement: ENV_VAR_NAME -> ENV_VAR_NAME_PLACEHOLDER
+		placeholderDirect := envKey + "_PLACEHOLDER"
+		if strings.Contains(result, placeholderDirect) {
+			result = strings.ReplaceAll(result, placeholderDirect, envValue)
+			logger.Debug("Replaced %s with environment variable %s", placeholderDirect, envKey)
+			replacements++
+		}
+		
+		// Common pattern: ENV_VAR_PLACEHOLDER -> ENV_VAR
+		if strings.HasSuffix(envKey, "_PLACEHOLDER") {
+			continue // Skip processing _PLACEHOLDER vars as keys
+		}
+		
+		// Check if there's a placeholder version of this env var
+		placeholderCommon := envKey + "_PLACEHOLDER"
+		if strings.Contains(result, placeholderCommon) {
+			result = strings.ReplaceAll(result, placeholderCommon, envValue)
+			logger.Debug("Replaced %s with environment variable %s", placeholderCommon, envKey)
+			replacements++
+		}
+		
+		// Handle specific common patterns like CLIENT_ID -> CLIENT_ID_PLACEHOLDER
+		// TENANT_ID -> TENANT_ID_PLACEHOLDER, etc.
+		placeholder := envKey + "_PLACEHOLDER"
+		if strings.Contains(result, placeholder) {
+			result = strings.ReplaceAll(result, placeholder, envValue)
+			logger.Debug("Replaced %s with environment variable %s", placeholder, envKey)
+			replacements++
+		}
+	}
+	
+	if replacements > 0 {
+		logger.Debug("Performed %d placeholder replacements in content", replacements)
+	}
+	
+	return result
+}
+
 // loadEnvFile loads environment variables from a .env file
 func loadEnvFile(envFilePath string) (map[string]string, error) {
 	envVars := make(map[string]string)
@@ -1432,7 +1483,7 @@ install_location: C:\
 }
 
 // buildPkgPackage creates a .pkg file (ZIP archive) with the sbin-installer structure
-func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string) (string, error) {
+func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string, envVars map[string]string) (string, error) {
 	buildDir := filepath.Join(projectDir, "build")
 	pkgName := buildInfo.Product.Name + "-" + filenameVersion + ".pkg"
 	pkgPath := filepath.Join(buildDir, pkgName)
@@ -1456,14 +1507,65 @@ func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string) (
 		logger.Debug("Copied payload directory to temp package structure")
 	}
 
-	// Copy scripts directory if it exists
+	// Copy scripts directory if it exists, applying placeholder replacement
 	scriptsSrc := filepath.Join(projectDir, "scripts")
 	if _, err := os.Stat(scriptsSrc); !os.IsNotExist(err) {
 		scriptsDst := filepath.Join(tempDir, "scripts")
-		if err := copyDirectory(scriptsSrc, scriptsDst); err != nil {
-			return "", fmt.Errorf("failed to copy scripts directory: %w", err)
+		if err := os.MkdirAll(scriptsDst, 0755); err != nil {
+			return "", fmt.Errorf("failed to create scripts directory: %w", err)
 		}
-		logger.Debug("Copied scripts directory to temp package structure")
+		
+		// Process each file in scripts directory
+		err := filepath.Walk(scriptsSrc, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			
+			// Skip directories
+			if info.IsDir() {
+				return nil
+			}
+			
+			// Calculate relative path
+			relPath, err := filepath.Rel(scriptsSrc, path)
+			if err != nil {
+				return fmt.Errorf("failed to calculate relative path: %w", err)
+			}
+			
+			dstPath := filepath.Join(scriptsDst, relPath)
+			
+			// Create destination directory if needed
+			if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+				return fmt.Errorf("failed to create directory for %s: %w", dstPath, err)
+			}
+			
+			// Read source file
+			content, err := os.ReadFile(path)
+			if err != nil {
+				return fmt.Errorf("failed to read %s: %w", path, err)
+			}
+			
+			// Apply placeholder replacement for script files (.ps1, .sh, .cmd, .bat)
+			ext := strings.ToLower(filepath.Ext(path))
+			if ext == ".ps1" || ext == ".sh" || ext == ".cmd" || ext == ".bat" {
+				contentStr := replacePlaceholders(string(content), envVars)
+				content = []byte(contentStr)
+				logger.Debug("Applied placeholder replacement to script: %s", relPath)
+			}
+			
+			// Write processed content to destination
+			if err := os.WriteFile(dstPath, content, info.Mode()); err != nil {
+				return fmt.Errorf("failed to write %s: %w", dstPath, err)
+			}
+			
+			return nil
+		})
+		
+		if err != nil {
+			return "", fmt.Errorf("failed to process scripts directory: %w", err)
+		}
+		
+		logger.Debug("Copied and processed scripts directory to temp package structure")
 		
 		// Sign PowerShell scripts in the temp scripts directory if signing cert is specified
 		if buildInfo.SigningCertificate != "" || buildInfo.SigningThumbprint != "" {
@@ -1772,7 +1874,7 @@ func main() {
 	} else {
 		// Build new .pkg format (default)
 		logger.Printf("Building .pkg format (sbin-installer compatible)")
-		finalPkgPath, err = buildPkgPackage(buildInfo, projectDir, filenameVersion)
+		finalPkgPath, err = buildPkgPackage(buildInfo, projectDir, filenameVersion, mergedEnvVars)
 		if err != nil {
 			logger.Fatal("Error building .pkg package: %v", err)
 		}
