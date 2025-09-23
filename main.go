@@ -153,8 +153,10 @@ func normalizeUnicodeChars(input string) string {
 }
 
 // replacePlaceholders replaces any placeholders in content with environment variable values
-// Supports patterns like: PLACEHOLDER_NAME -> looks for env var PLACEHOLDER_NAME
-// Also supports common patterns like: SOME_VAR_PLACEHOLDER -> looks for env var SOME_VAR
+// Supports multiple patterns:
+// 1. PowerShell: $env:VARIABLE_NAME -> looks for env var VARIABLE_NAME
+// 2. Batch/CMD: %VARIABLE_NAME% -> looks for env var VARIABLE_NAME  
+// 3. Legacy: VARIABLE_NAME_PLACEHOLDER -> looks for env var VARIABLE_NAME
 func replacePlaceholders(content string, envVars map[string]string) string {
 	result := content
 	replacements := 0
@@ -165,39 +167,30 @@ func replacePlaceholders(content string, envVars map[string]string) string {
 			continue
 		}
 		
-		// Direct replacement: ENV_VAR_NAME -> ENV_VAR_NAME_PLACEHOLDER
-		placeholderDirect := envKey + "_PLACEHOLDER"
-		if strings.Contains(result, placeholderDirect) {
-			result = strings.ReplaceAll(result, placeholderDirect, envValue)
-			logger.Debug("Replaced %s with environment variable %s", placeholderDirect, envKey)
+		// Pattern 1: PowerShell environment variables: $env:VARIABLE_NAME
+		powershellPattern := "$env:" + envKey
+		if strings.Contains(result, powershellPattern) {
+			result = strings.ReplaceAll(result, powershellPattern, `"`+envValue+`"`)
 			replacements++
 		}
 		
-		// Common pattern: ENV_VAR_PLACEHOLDER -> ENV_VAR
-		if strings.HasSuffix(envKey, "_PLACEHOLDER") {
-			continue // Skip processing _PLACEHOLDER vars as keys
-		}
-		
-		// Check if there's a placeholder version of this env var
-		placeholderCommon := envKey + "_PLACEHOLDER"
-		if strings.Contains(result, placeholderCommon) {
-			result = strings.ReplaceAll(result, placeholderCommon, envValue)
-			logger.Debug("Replaced %s with environment variable %s", placeholderCommon, envKey)
+		// Pattern 2: Batch/CMD environment variables: %VARIABLE_NAME%
+		batchPattern := "%" + envKey + "%"
+		if strings.Contains(result, batchPattern) {
+			result = strings.ReplaceAll(result, batchPattern, envValue)
 			replacements++
 		}
 		
-		// Handle specific common patterns like CLIENT_ID -> CLIENT_ID_PLACEHOLDER
-		// TENANT_ID -> TENANT_ID_PLACEHOLDER, etc.
-		placeholder := envKey + "_PLACEHOLDER"
-		if strings.Contains(result, placeholder) {
-			result = strings.ReplaceAll(result, placeholder, envValue)
-			logger.Debug("Replaced %s with environment variable %s", placeholder, envKey)
+		// Pattern 3: Legacy placeholder pattern: VARIABLE_NAME_PLACEHOLDER
+		placeholderPattern := envKey + "_PLACEHOLDER"
+		if strings.Contains(result, placeholderPattern) {
+			result = strings.ReplaceAll(result, placeholderPattern, envValue)
 			replacements++
 		}
 	}
 	
 	if replacements > 0 {
-		logger.Debug("Performed %d placeholder replacements in content", replacements)
+		logger.Debug("Performed %d environment variable replacements in script", replacements)
 	}
 	
 	return result
@@ -243,7 +236,6 @@ func loadEnvFile(envFilePath string) (map[string]string, error) {
 				}
 				
 				envVars[key] = value
-				logger.Debug("Loaded environment variable: %s", key)
 			} else {
 				logger.Debug("Skipping malformed line %d in %s: %s", lineNum+1, envFilePath, line)
 			}
@@ -252,7 +244,6 @@ func loadEnvFile(envFilePath string) (map[string]string, error) {
 		}
 	}
 
-	logger.Debug("Loaded %d environment variables from %s", len(envVars), envFilePath)
 	return envVars, nil
 }
 
@@ -1807,7 +1798,6 @@ func main() {
 		candidateEnvFile := filepath.Join(projectDir, ".env")
 		if _, err := os.Stat(candidateEnvFile); err == nil {
 			envFilePath = candidateEnvFile
-			logger.Debug("Auto-detected .env file: %s", envFilePath)
 		}
 	}
 	
@@ -1847,8 +1837,6 @@ func main() {
 	if err != nil {
 		logger.Fatal("Error parsing version: %v", err)
 	}
-	logger.Debug("Original version (for filename): %s", originalVersion)
-	logger.Debug("Normalized version (for .nuspec): %s", normalizedVersion)
 	
 	// Store both versions for different uses
 	filenameVersion := originalVersion
