@@ -24,6 +24,9 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
+// version is injected at build time via -ldflags "-X main.version=..."
+var version = "unknown"
+
 // BuildInfo holds package build information parsed from YAML.
 type BuildInfo struct {
 	InstallLocation    string `yaml:"install_location"`
@@ -1091,7 +1094,7 @@ func createPackageSignature(tempDir, certSubject, thumbprint string) (*PackageSi
 		ContentHashes:      contentHashes,
 		SignedHash:         signedHash,
 		SignedAt:          time.Now().UTC().Format(time.RFC3339),
-		SigningTool:       "cimipkg v" + getVersion(),
+		SigningTool:       "cimipkg v" + version,
 	}
 	
 	logger.Printf("Package signature created successfully")
@@ -1100,11 +1103,6 @@ func createPackageSignature(tempDir, certSubject, thumbprint string) (*PackageSi
 	logger.Debug("Content files: %d", len(contentHashes))
 	
 	return signature, nil
-}
-
-// getVersion returns the version string (simplified implementation)
-func getVersion() string {
-	return "2025.09.21" // In real implementation, this would come from build-time version info
 }
 
 // generateNuspec builds the .nuspec file
@@ -1749,17 +1747,24 @@ func buildNupkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string,
 
 func main() {
 	var (
-		verbose    bool
-		createPath string
+		verbose     bool
+		createPath  string
+		showVersion bool
 	)
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg (only works with --nupkg)")
 	flag.BoolVar(&nupkgFlag, "nupkg", false, "Build legacy .nupkg format (default is .pkg)")
 	flag.StringVar(&createPath, "create", "", "Create a new project structure at the specified path")
 	flag.StringVar(&envFileFlag, "env", "", "Path to .env file containing environment variables to inject into scripts")
+	flag.BoolVar(&showVersion, "version", false, "Show version information")
 	flag.Parse()
 
 	setupLogging(verbose)
+
+	if showVersion {
+		fmt.Printf("%s\n", version)
+		return
+	}
 
 	if createPath != "" {
 		createPath = NormalizePath(createPath)
