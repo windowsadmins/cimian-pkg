@@ -6,7 +6,7 @@ This tool simplifies deployment complexities by providing YAML-based configurati
 
 ### Package Formats
 
-- **`.pkg` (default)**: Modern ZIP-based packages compatible with **sbin-installer**
+- **`.pkg` (default)**: Modern ZIP-based packages compatible with **[sbin-installer](https://github.com/windowsadmins/sbin-installer)**
   - Cryptographic signature metadata embedded in `build-info.yaml`
   - Deterministic installations with full integrity verification
   - Direct script execution without dependency overhead
