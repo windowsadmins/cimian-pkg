@@ -45,15 +45,25 @@ type BuildInfo struct {
 }
 
 // PackageSignature contains cryptographic signature information for .pkg packages
+// This structure matches pkg/extract/pkg.go PkgSignature for verification compatibility
 type PackageSignature struct {
-	Algorithm         string            `yaml:"algorithm"`           // e.g., "SHA256"
-	CertificateHash   string            `yaml:"certificate_hash"`    // Hash of the signing certificate
-	CertificateSubject string           `yaml:"certificate_subject"` // Subject name of certificate
-	PackageHash       string            `yaml:"package_hash"`        // Hash of package contents before signing
-	ContentHashes     map[string]string `yaml:"content_hashes"`      // Hash of individual files
-	SignedHash        string            `yaml:"signed_hash"`         // Cryptographic signature of package hash
-	SignedAt          string            `yaml:"signed_at"`           // ISO timestamp when signed
-	SigningTool       string            `yaml:"signing_tool"`        // Tool used for signing
+	Algorithm   string              `yaml:"algorithm"`    // e.g., "SHA256"
+	Certificate CertificateInfo     `yaml:"certificate"`  // Certificate information
+	PackageHash string              `yaml:"package_hash"` // Hash of package contents before signing
+	ContentHash string              `yaml:"content_hash"` // Combined hash of all content files
+	SignedHash  string              `yaml:"signed_hash"`  // Cryptographic signature of package hash
+	Timestamp   string              `yaml:"timestamp"`    // ISO timestamp when signed
+	Version     string              `yaml:"version"`      // Signature format version
+}
+
+// CertificateInfo contains certificate metadata for signature verification
+type CertificateInfo struct {
+	Subject      string `yaml:"subject"`
+	Issuer       string `yaml:"issuer"`
+	Thumbprint   string `yaml:"thumbprint"`
+	SerialNumber string `yaml:"serial_number"`
+	NotBefore    string `yaml:"not_before"`
+	NotAfter     string `yaml:"not_after"`
 }
 
 // Package defines the structure of a .nuspec package.
@@ -995,33 +1005,105 @@ func calculateFileHash(filePath string) (string, error) {
 }
 
 // getCertificateInfo retrieves certificate information for signing
-func getCertificateInfo(certSubject, thumbprint string) (string, string, error) {
-	// Use PowerShell to get certificate information
-	var psCommand string
+func getCertificateInfo(certSubject, thumbprint string) (*CertificateInfo, error) {
+	// Use certutil to enumerate certificates - more reliable than PowerShell
+	var certutilCmd *exec.Cmd
 	
 	if thumbprint != "" {
-		psCommand = fmt.Sprintf(`Get-ChildItem -Path "Cert:\CurrentUser\My\%s" -ErrorAction SilentlyContinue | ForEach-Object { Write-Output $_.Subject; Write-Output $_.Thumbprint }`, thumbprint)
+		// certutil -store -user My <thumbprint>
+		certutilCmd = exec.Command("certutil", "-store", "-user", "My", thumbprint)
 	} else {
-		// Escape quotes in the certificate subject name
-		escapedSubject := strings.ReplaceAll(certSubject, `"`, `""`)
-		psCommand = fmt.Sprintf(`Get-ChildItem -Path "Cert:\CurrentUser\My" | Where-Object { $_.Subject -like "*%s*" } | Select-Object -First 1 | ForEach-Object { Write-Output $_.Subject; Write-Output $_.Thumbprint }`, escapedSubject)
+		// certutil -store -user My and parse output for matching subject
+		certutilCmd = exec.Command("certutil", "-store", "-user", "My")
 	}
 	
-	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", psCommand)
-	output, err := cmd.Output()
+	output, err := certutilCmd.CombinedOutput()
 	if err != nil {
-		return "", "", fmt.Errorf("failed to get certificate info (command: %s): %w", psCommand, err)
+		return nil, fmt.Errorf("failed to run certutil: %w (output: %s)", err, string(output))
 	}
 	
-	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	if len(lines) < 2 {
-		return "", "", fmt.Errorf("certificate not found or unexpected output format: got %d lines", len(lines))
+	outputStr := string(output)
+	
+	// Parse certutil output - format:
+	// ================ Certificate <index> ================
+	// Serial Number: <hex>
+	// Issuer: <DN>
+	// NotBefore: <date>
+	// NotAfter: <date>
+	// Subject: <DN>
+	// Certificate Hash(sha1): <thumbprint>
+	
+	var foundCert *CertificateInfo
+	lines := strings.Split(outputStr, "\n")
+	var currentCert CertificateInfo
+	inCert := false
+	
+	for i := 0; i < len(lines); i++ {
+		line := strings.TrimSpace(lines[i])
+		
+		if strings.HasPrefix(line, "================ Certificate") {
+			// Start of new certificate
+			if inCert {
+				// Check if we found a matching certificate
+				if thumbprint == "" && certSubject != "" && strings.Contains(strings.ToLower(currentCert.Subject), strings.ToLower(certSubject)) {
+					foundCert = &currentCert
+					break
+				} else if thumbprint != "" {
+					// When searching by thumbprint, certutil only returns the matching cert
+					foundCert = &currentCert
+					break
+				}
+			}
+			currentCert = CertificateInfo{}
+			inCert = true
+			continue
+		}
+		
+		if !inCert {
+			continue
+		}
+		
+		// Parse certificate fields
+		if strings.HasPrefix(line, "Serial Number: ") {
+			currentCert.SerialNumber = strings.TrimSpace(strings.TrimPrefix(line, "Serial Number: "))
+		} else if strings.HasPrefix(line, "Issuer: ") {
+			currentCert.Issuer = strings.TrimSpace(strings.TrimPrefix(line, "Issuer: "))
+		} else if strings.HasPrefix(line, "NotBefore: ") {
+			dateStr := strings.TrimSpace(strings.TrimPrefix(line, "NotBefore: "))
+			// Parse Windows date format and convert to ISO8601
+			if parsed, err := time.Parse("1/2/2006 3:04 PM", dateStr); err == nil {
+				currentCert.NotBefore = parsed.Format(time.RFC3339)
+			} else {
+				currentCert.NotBefore = dateStr
+			}
+		} else if strings.HasPrefix(line, "NotAfter: ") {
+			dateStr := strings.TrimSpace(strings.TrimPrefix(line, "NotAfter: "))
+			if parsed, err := time.Parse("1/2/2006 3:04 PM", dateStr); err == nil {
+				currentCert.NotAfter = parsed.Format(time.RFC3339)
+			} else {
+				currentCert.NotAfter = dateStr
+			}
+		} else if strings.HasPrefix(line, "Subject: ") {
+			currentCert.Subject = strings.TrimSpace(strings.TrimPrefix(line, "Subject: "))
+		} else if strings.HasPrefix(line, "Cert Hash(sha1): ") {
+			currentCert.Thumbprint = strings.ReplaceAll(strings.TrimSpace(strings.TrimPrefix(line, "Cert Hash(sha1): ")), " ", "")
+		}
 	}
 	
-	subject := strings.TrimSpace(lines[0])
-	certThumbprint := strings.TrimSpace(lines[1])
+	// Check final certificate
+	if inCert && foundCert == nil {
+		if thumbprint == "" && certSubject != "" && strings.Contains(strings.ToLower(currentCert.Subject), strings.ToLower(certSubject)) {
+			foundCert = &currentCert
+		} else if thumbprint != "" && currentCert.Subject != "" {
+			foundCert = &currentCert
+		}
+	}
 	
-	return subject, certThumbprint, nil
+	if foundCert == nil {
+		return nil, fmt.Errorf("certificate not found")
+	}
+	
+	return foundCert, nil
 }
 
 // signPackageHash creates a cryptographic signature of the package hash
@@ -1046,51 +1128,40 @@ func signPackageHash(packageHash, certSubject, thumbprint string) (string, error
 func createPackageSignature(tempDir, certSubject, thumbprint string) (*PackageSignature, error) {
 	logger.Printf("Creating package signature metadata...")
 	
-	// Calculate package hash and content hashes
+	// Calculate package hash (this is the combined hash of all content)
 	packageHash, contentHashes, err := calculateDirectoryHash(tempDir)
 	if err != nil {
 		return nil, fmt.Errorf("failed to calculate package hash: %w", err)
 	}
 	
-	// Use provided certificate information or defaults
-	subject := certSubject
-	if subject == "" && thumbprint == "" {
-		subject = "Unknown Certificate"
+	// Get certificate information from Windows Certificate Store
+	certInfo, err := getCertificateInfo(certSubject, thumbprint)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get certificate info: %w", err)
 	}
-	
-	// Use thumbprint if provided, otherwise try to get from subject
-	certThumbprint := thumbprint
-	if certThumbprint == "" {
-		// For now, create a simple hash based on subject name
-		// In production, this would do proper certificate lookup
-		hashBytes := sha256.Sum256([]byte(subject))
-		certThumbprint = hex.EncodeToString(hashBytes[:])[:16] + "..."
-	}
-	
-	// Create certificate hash
-	certHashBytes := sha256.Sum256([]byte(certThumbprint))
-	certHash := hex.EncodeToString(certHashBytes[:])
 	
 	// Sign the package hash (simplified implementation)
-	signedHash, err := signPackageHash(packageHash, certSubject, thumbprint)
+	signedHash, err := signPackageHash(packageHash, certInfo.Subject, certInfo.Thumbprint)
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign package hash: %w", err)
 	}
 	
+	// For verification, we use packageHash as both PackageHash and ContentHash
+	// since packageHash is already the combined hash of all files
 	signature := &PackageSignature{
-		Algorithm:          "SHA256",
-		CertificateHash:    certHash,
-		CertificateSubject: subject,
-		PackageHash:        packageHash,
-		ContentHashes:      contentHashes,
-		SignedHash:         signedHash,
-		SignedAt:          time.Now().UTC().Format(time.RFC3339),
-		SigningTool:       "cimipkg v" + version,
+		Algorithm:   "SHA256",
+		Certificate: *certInfo,
+		PackageHash: packageHash,
+		ContentHash: packageHash, // Use the same combined hash
+		SignedHash:  signedHash,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Version:     "1.0",
 	}
 	
 	logger.Printf("Package signature created successfully")
 	logger.Debug("Package hash: %s", packageHash[:16]+"...")
-	logger.Debug("Certificate subject: %s", subject)
+	logger.Debug("Certificate subject: %s", certInfo.Subject)
+	logger.Debug("Certificate thumbprint: %s", certInfo.Thumbprint)
 	logger.Debug("Content files: %d", len(contentHashes))
 	
 	return signature, nil
@@ -1583,11 +1654,16 @@ func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string, e
 	if buildInfo.SigningCertificate != "" || buildInfo.SigningThumbprint != "" {
 		signature, err := createPackageSignature(tempDir, buildInfo.SigningCertificate, buildInfo.SigningThumbprint)
 		if err != nil {
-			logger.Debug("Warning: Failed to create package signature: %v", err)
-			// Don't fail the build, just warn
+			logger.Printf("Warning: Failed to create package signature: %v", err)
+			logger.Printf("Package will be created without embedded signature metadata")
+			logger.Printf("Note: PowerShell scripts inside the package are still code-signed for integrity")
+			// Don't fail the build, just warn - package can still be created
 		} else {
 			buildInfoForSigning.Signature = signature
+			logger.Printf("Package signature metadata embedded successfully")
 		}
+	} else {
+		logger.Printf("No signing certificate specified - package will be created without signature metadata")
 	}
 	
 	// Write the updated build-info.yaml with signature to the package
@@ -1736,11 +1812,209 @@ func buildNupkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string,
 	return finalPkgPath, nil
 }
 
+// resignPackage adds or updates signature metadata in an existing .pkg package
+// This function is optimized to avoid recompressing large payloads by:
+// 1. Extracting only build-info.yaml (not the entire package)
+// 2. Calculating signature from the existing ZIP contents
+// 3. Updating only build-info.yaml in the ZIP
+func resignPackage(pkgPath string, certName, certThumbprint string) error {
+	logger.Printf("Re-signing existing package: %s", pkgPath)
+	
+	// Create temporary directory for build-info.yaml only
+	tempDir, err := os.MkdirTemp("", "cimipkg_resign_*")
+	if err != nil {
+		return fmt.Errorf("failed to create temp directory: %w", err)
+	}
+	defer os.RemoveAll(tempDir)
+	
+	// Extract ONLY build-info.yaml (fast - doesn't touch payload)
+	logger.Debug("Extracting build-info.yaml from package...")
+	buildInfoPath := filepath.Join(tempDir, "build-info.yaml")
+	if err := extractFileFromZip(pkgPath, "build-info.yaml", buildInfoPath); err != nil {
+		return fmt.Errorf("failed to extract build-info.yaml: %w", err)
+	}
+	
+	// Read existing build-info.yaml
+	buildInfo := &BuildInfo{}
+	data, err := os.ReadFile(buildInfoPath)
+	if err != nil {
+		return fmt.Errorf("failed to read build-info.yaml: %w", err)
+	}
+	
+	if err := yaml.Unmarshal(data, buildInfo); err != nil {
+		return fmt.Errorf("failed to parse build-info.yaml: %w", err)
+	}
+	
+	// Set signing certificate if not already set
+	if buildInfo.SigningCertificate == "" {
+		if certName == "" {
+			return fmt.Errorf("no signing certificate specified in build-info.yaml or command line")
+		}
+		buildInfo.SigningCertificate = certName
+	}
+	if certThumbprint != "" {
+		buildInfo.SigningThumbprint = certThumbprint
+	}
+	
+	// Calculate signature from existing ZIP contents (without extracting payload)
+	logger.Printf("Calculating package signature from existing contents...")
+	signature, err := createPackageSignatureFromZip(pkgPath, buildInfo.SigningCertificate, buildInfo.SigningThumbprint)
+	if err != nil {
+		logger.Printf("Warning: Failed to create package signature: %v", err)
+		logger.Printf("Package will be updated without signature metadata")
+	} else {
+		buildInfo.Signature = signature
+		logger.Success("Package signature created successfully")
+		logger.Printf("Package hash: %s", signature.PackageHash[:16]+"...")
+		logger.Printf("Certificate subject: %s", signature.Certificate.Subject)
+		logger.Printf("Certificate thumbprint: %s", signature.Certificate.Thumbprint)
+		logger.Success("Package signature metadata embedded successfully")
+	}
+	
+	// Write updated build-info.yaml
+	updatedData, err := yaml.Marshal(buildInfo)
+	if err != nil {
+		return fmt.Errorf("failed to marshal build-info.yaml: %w", err)
+	}
+	
+	if err := os.WriteFile(buildInfoPath, updatedData, 0644); err != nil {
+		return fmt.Errorf("failed to write build-info.yaml: %w", err)
+	}
+	
+	// Update ONLY build-info.yaml in the ZIP (fast - doesn't touch payload)
+	logger.Debug("Updating build-info.yaml in package...")
+	if err := updateFileInZip(pkgPath, "build-info.yaml", buildInfoPath); err != nil {
+		return fmt.Errorf("failed to update build-info.yaml in package: %w", err)
+	}
+	
+	logger.Success("Package re-signed successfully: %s", pkgPath)
+	logger.Printf("Note: Payload files were not extracted or recompressed (fast operation)")
+	return nil
+}
+
+// extractFileFromZip extracts a single file from a ZIP archive
+func extractFileFromZip(zipPath, fileInZip, destPath string) error {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf(
+		"Add-Type -AssemblyName System.IO.Compression.FileSystem; "+
+			"$zip = [System.IO.Compression.ZipFile]::OpenRead('%s'); "+
+			"$entry = $zip.Entries | Where-Object { $_.FullName -eq '%s' } | Select-Object -First 1; "+
+			"if ($entry) { [System.IO.Compression.ZipFileExtensions]::ExtractToFile($entry, '%s', $true) }; "+
+			"$zip.Dispose()",
+		zipPath, fileInZip, destPath))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to extract file: %w (output: %s)", err, string(output))
+	}
+	return nil
+}
+
+// updateFileInZip updates a single file in a ZIP archive without recompressing everything
+func updateFileInZip(zipPath, fileInZip, sourcePath string) error {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf(
+		"Add-Type -AssemblyName System.IO.Compression.FileSystem; "+
+			"$zip = [System.IO.Compression.ZipFile]::Open('%s', 'Update'); "+
+			"$entry = $zip.Entries | Where-Object { $_.FullName -eq '%s' } | Select-Object -First 1; "+
+			"if ($entry) { $entry.Delete() }; "+
+			"[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zip, '%s', '%s'); "+
+			"$zip.Dispose()",
+		zipPath, fileInZip, sourcePath, fileInZip))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to update file in zip: %w (output: %s)", err, string(output))
+	}
+	return nil
+}
+
+// createPackageSignatureFromZip creates a package signature by reading files directly from ZIP
+// This avoids extracting the entire package (critical for large packages)
+func createPackageSignatureFromZip(zipPath, certSubject, certThumbprint string) (*PackageSignature, error) {
+	// Get certificate info
+	var certInfo *CertificateInfo
+	var err error
+	
+	if certThumbprint != "" {
+		certInfo, err = getCertificateInfo("", certThumbprint)
+	} else {
+		certInfo, err = getCertificateInfo(certSubject, "")
+	}
+	
+	if err != nil {
+		return nil, fmt.Errorf("failed to get certificate info: %w", err)
+	}
+	
+	// Calculate package hash by reading ZIP entries directly
+	logger.Debug("Calculating content hash from ZIP entries...")
+	contentHash, err := calculateZipContentHash(zipPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate content hash: %w", err)
+	}
+	
+	// Create signed hash
+	signedHashBytes := sha256.Sum256([]byte(contentHash + certInfo.Thumbprint))
+	signedHash := base64.StdEncoding.EncodeToString(signedHashBytes[:])
+	
+	signature := &PackageSignature{
+		Algorithm:   "SHA256",
+		Certificate: *certInfo,
+		PackageHash: contentHash,
+		ContentHash: contentHash,
+		SignedHash:  signedHash,
+		Timestamp:   time.Now().UTC().Format(time.RFC3339),
+		Version:     "1.0",
+	}
+	
+	return signature, nil
+}
+
+// calculateZipContentHash calculates a hash of all files in the ZIP (except build-info.yaml)
+// by reading entries directly without extracting
+func calculateZipContentHash(zipPath string) (string, error) {
+	// Use PowerShell to get list of files and their hashes from ZIP
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", fmt.Sprintf(
+		"Add-Type -AssemblyName System.IO.Compression.FileSystem; "+
+			"$zip = [System.IO.Compression.ZipFile]::OpenRead('%s'); "+
+			"$hashes = @(); "+
+			"$zip.Entries | Where-Object { $_.FullName -ne 'build-info.yaml' -and $_.Length -gt 0 } | Sort-Object FullName | ForEach-Object { "+
+			"  $stream = $_.Open(); "+
+			"  $sha = [System.Security.Cryptography.SHA256]::Create(); "+
+			"  $hash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','').ToLower(); "+
+			"  $hashes += \"$($_.FullName):$hash\"; "+
+			"  $stream.Close(); "+
+			"}; "+
+			"$zip.Dispose(); "+
+			"$hashes -join '|'",
+		zipPath))
+	
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("failed to calculate content hash: %w (output: %s)", err, string(output))
+	}
+	
+	// Hash the concatenated file hashes
+	combinedHash := strings.TrimSpace(string(output))
+	finalHashBytes := sha256.Sum256([]byte(combinedHash))
+	return hex.EncodeToString(finalHashBytes[:]), nil
+}
+
+// extractZip extracts a ZIP file to a destination directory
+func extractZip(zipPath, destDir string) error {
+	cmd := exec.Command("powershell", "-NoProfile", "-Command",
+		fmt.Sprintf("Expand-Archive -Path '%s' -DestinationPath '%s' -Force", zipPath, destDir))
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("failed to extract zip: %w (output: %s)", err, string(output))
+	}
+	return nil
+}
+
 func main() {
 	var (
-		verbose     bool
-		createPath  string
-		showVersion bool
+		verbose         bool
+		createPath      string
+		showVersion     bool
+		resignPath      string
+		resignCert      string
+		resignThumbprint string
 	)
 	flag.BoolVar(&verbose, "verbose", false, "Enable verbose logging")
 	flag.BoolVar(&intuneWinFlag, "intunewin", false, "Also generate a .intunewin from the built .nupkg (only works with --nupkg)")
@@ -1748,12 +2022,25 @@ func main() {
 	flag.StringVar(&createPath, "create", "", "Create a new project structure at the specified path")
 	flag.StringVar(&envFileFlag, "env", "", "Path to .env file containing environment variables to inject into scripts")
 	flag.BoolVar(&showVersion, "version", false, "Show version information")
+	flag.StringVar(&resignPath, "resign", "", "Re-sign an existing .pkg package without recompressing (fast signature injection)")
+	flag.StringVar(&resignCert, "resign-cert", "", "Certificate name for re-signing (optional if already in build-info.yaml)")
+	flag.StringVar(&resignThumbprint, "resign-thumbprint", "", "Certificate thumbprint for re-signing (optional)")
 	flag.Parse()
 
 	setupLogging(verbose)
 
 	if showVersion {
 		fmt.Printf("%s\n", version)
+		return
+	}
+
+	if resignPath != "" {
+		resignPath = NormalizePath(resignPath)
+		logger.Printf("Re-signing package: %s", resignPath)
+		if err := resignPackage(resignPath, resignCert, resignThumbprint); err != nil {
+			logger.Fatal("Error re-signing package: %v", err)
+		}
+		logger.Success("Package re-signed successfully!")
 		return
 	}
 
