@@ -206,6 +206,48 @@ func replacePlaceholders(content string, envVars map[string]string) string {
 	return result
 }
 
+// replacePlaceholdersYAML replaces placeholders in YAML content without adding quotes
+// This prevents YAML parsing errors from quoted values in YAML structure
+func replacePlaceholdersYAML(content string, envVars map[string]string) string {
+	result := content
+	replacements := 0
+	
+	// Replace any environment variable that has a corresponding placeholder
+	for envKey, envValue := range envVars {
+		if envValue == "" {
+			continue
+		}
+		
+		// Pattern 1: PowerShell environment variables: $env:VARIABLE_NAME
+		// In YAML, don't add quotes - let YAML handle the value
+		powershellPattern := "$env:" + envKey
+		if strings.Contains(result, powershellPattern) {
+			result = strings.ReplaceAll(result, powershellPattern, envValue)
+			replacements++
+		}
+		
+		// Pattern 2: Batch/CMD environment variables: %VARIABLE_NAME%
+		batchPattern := "%" + envKey + "%"
+		if strings.Contains(result, batchPattern) {
+			result = strings.ReplaceAll(result, batchPattern, envValue)
+			replacements++
+		}
+		
+		// Pattern 3: Legacy placeholder pattern: VARIABLE_NAME_PLACEHOLDER
+		placeholderPattern := envKey + "_PLACEHOLDER"
+		if strings.Contains(result, placeholderPattern) {
+			result = strings.ReplaceAll(result, placeholderPattern, envValue)
+			replacements++
+		}
+	}
+	
+	if replacements > 0 {
+		logger.Debug("Performed %d environment variable replacements in YAML", replacements)
+	}
+	
+	return result
+}
+
 // loadEnvFile loads environment variables from a .env file
 func loadEnvFile(envFilePath string) (map[string]string, error) {
 	envVars := make(map[string]string)
@@ -1645,8 +1687,15 @@ func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string, e
 		return "", fmt.Errorf("failed to read build-info.yaml: %w", err)
 	}
 	
+	// Apply placeholder replacement to build-info.yaml content (YAML-safe version)
+	buildInfoContent := string(buildInfoData)
+	if len(envVars) > 0 {
+		buildInfoContent = replacePlaceholdersYAML(buildInfoContent, envVars)
+		logger.Debug("Applied placeholder replacement to build-info.yaml")
+	}
+	
 	var buildInfoForSigning BuildInfo
-	if err := yaml.Unmarshal(buildInfoData, &buildInfoForSigning); err != nil {
+	if err := yaml.Unmarshal([]byte(buildInfoContent), &buildInfoForSigning); err != nil {
 		return "", fmt.Errorf("failed to parse build-info.yaml for signing: %w", err)
 	}
 	
