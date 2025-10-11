@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -365,6 +366,11 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 		return nil, fmt.Errorf("error parsing YAML: %w", err)
 	}
 
+	// Sanitize install_location to handle YAML parsing quirks with backslashes
+	// YAML may mangle unquoted paths like "C:\ProgramData" into just "\" 
+	// because \P is treated as an escape sequence
+	buildInfo.InstallLocation = sanitizeYAMLPath(buildInfo.InstallLocation)
+
 	return &buildInfo, nil
 }
 
@@ -476,6 +482,50 @@ func createProjectDirectory(projectDir string) error {
 		}
 	}
 	return nil
+}
+
+// sanitizeYAMLPath fixes paths that were mangled by YAML parsing.
+// YAML treats backslashes as escape characters in unquoted strings, so paths like
+// "C:\ProgramData" may be parsed incorrectly (e.g., \P becomes just the letter P).
+// This function attempts to reconstruct the intended Windows path.
+//
+// Special case: "\\" is treated as valid (script-only packages with no install location)
+func sanitizeYAMLPath(path string) string {
+	if path == "" {
+		return path
+	}
+
+	// Special case: Single backslash is valid for script-only packages (no install location)
+	// Don't modify it - this is intentional and used for payload-free packages
+	if path == `\` {
+		return path
+	}
+
+	// Common YAML mangling patterns for Windows paths:
+	// "C:\ProgramData" → "C:ProgramData" (backslash consumed by escape sequence)
+	// "C:\Program Files" → "C:Program Files"
+	// "C:\Windows" → "C:Windows"
+	// "C:\Users\Public" → "C:UsersPublic" (both backslashes consumed)
+	
+	// Pattern 1: Drive letter followed by colon and text without backslash (e.g., "C:ProgramData")
+	// This likely means the backslash was consumed by YAML escape sequence
+	drivePattern := regexp.MustCompile(`^([A-Za-z]):([^\\].*)$`)
+	if matches := drivePattern.FindStringSubmatch(path); matches != nil {
+		reconstructed := matches[1] + `:\` + matches[2]
+		logger.Debug("YAML path sanitization: '%s' → '%s' (re-inserted missing backslash after drive letter)", path, reconstructed)
+		return reconstructed
+	}
+
+	// Pattern 2: Path starting with backslash but no drive letter - likely invalid/mangled
+	// This shouldn't happen in normal use, but could indicate severe mangling
+	if strings.HasPrefix(path, `\`) && !strings.Contains(path[1:], `:`) {
+		logger.Debug("YAML path sanitization: '%s' appears severely mangled (no drive letter found)", path)
+		// Don't auto-fix - return as-is and let validation catch it
+		return path
+	}
+
+	// Path looks valid, return as-is
+	return path
 }
 
 // normalizeInstallLocation ensures the install location ends with a backslash
