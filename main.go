@@ -1819,16 +1819,40 @@ func createZipArchive(sourceDir, zipPath string) error {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
+	// PowerShell's Compress-Archive only accepts .zip extension
+	// Create as .zip first, then rename to desired extension
+	tempZipPath := zipPath
+	needsRename := false
+	
+	if !strings.HasSuffix(strings.ToLower(zipPath), ".zip") {
+		tempZipPath = zipPath + ".tmp.zip"
+		needsRename = true
+	}
+
 	// Use PowerShell's Compress-Archive cmdlet for reliable ZIP creation
 	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", fmt.Sprintf(
 		"Import-Module Microsoft.PowerShell.Archive -Force; Compress-Archive -Path '%s\\*' -DestinationPath '%s' -Force",
-		sourceDir, zipPath))
+		sourceDir, tempZipPath))
 	
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("failed to create ZIP archive: %w", err)
+	}
+
+	// Rename to final extension if needed
+	if needsRename {
+		// Remove existing file if it exists
+		if _, err := os.Stat(zipPath); err == nil {
+			if err := os.Remove(zipPath); err != nil {
+				return fmt.Errorf("failed to remove existing package: %w", err)
+			}
+		}
+		
+		if err := os.Rename(tempZipPath, zipPath); err != nil {
+			return fmt.Errorf("failed to rename archive to final package: %w", err)
+		}
 	}
 
 	return nil
