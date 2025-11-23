@@ -1701,6 +1701,21 @@ func buildPkgPackage(buildInfo *BuildInfo, projectDir, filenameVersion string, e
 			ext := strings.ToLower(filepath.Ext(path))
 			if ext == ".ps1" || ext == ".sh" || ext == ".cmd" || ext == ".bat" {
 				contentStr := replacePlaceholders(string(content), envVars)
+				
+				// For PowerShell scripts in .pkg packages, inject variable mapping header
+				// This ensures scripts can use $payloadRoot, $installLocation etc. as local variables
+				// matching the behavior of .nupkg (Chocolatey) wrapper scripts
+				if ext == ".ps1" {
+					header := `# cimipkg: Auto-mapped variables for consistency
+if ($env:payloadRoot -and -not $payloadRoot) { $payloadRoot = $env:payloadRoot }
+if ($env:payloadDir -and -not $payloadDir) { $payloadDir = $env:payloadDir }
+if ($env:installLocation -and -not $installLocation) { $installLocation = $env:installLocation }
+
+`
+					contentStr = header + contentStr
+					logger.Debug("Injected variable mapping header into script: %s", relPath)
+				}
+				
 				content = []byte(contentStr)
 				logger.Debug("Applied placeholder replacement to script: %s", relPath)
 			}
