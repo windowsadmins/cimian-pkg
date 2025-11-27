@@ -3,6 +3,7 @@
 package main
 
 import (
+	"archive/zip"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -1827,47 +1828,93 @@ func copyDirectory(src, dst string) error {
 	})
 }
 
-// createZipArchive creates a ZIP archive from the source directory
+// createZipArchive creates a ZIP archive from the source directory using Go's native
+// archive/zip package with ZIP64 support for files larger than 2GB.
+// This replaces the previous PowerShell Compress-Archive implementation which had
+// a 2GB file size limitation due to .NET Framework's System.IO.Compression library.
 func createZipArchive(sourceDir, zipPath string) error {
 	// Ensure the destination directory exists
 	if err := os.MkdirAll(filepath.Dir(zipPath), os.ModePerm); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
 
-	// PowerShell's Compress-Archive only accepts .zip extension
-	// Create as .zip first, then rename to desired extension
-	tempZipPath := zipPath
-	needsRename := false
-	
-	if !strings.HasSuffix(strings.ToLower(zipPath), ".zip") {
-		tempZipPath = zipPath + ".tmp.zip"
-		needsRename = true
+	// Create the ZIP file
+	zipFile, err := os.Create(zipPath)
+	if err != nil {
+		return fmt.Errorf("failed to create ZIP file: %w", err)
 	}
+	defer zipFile.Close()
 
-	// Use PowerShell's Compress-Archive cmdlet for reliable ZIP creation
-	cmd := exec.Command("powershell", "-ExecutionPolicy", "Bypass", "-Command", fmt.Sprintf(
-		"Import-Module Microsoft.PowerShell.Archive -Force; Compress-Archive -Path '%s\\*' -DestinationPath '%s' -Force",
-		sourceDir, tempZipPath))
-	
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("failed to create ZIP archive: %w", err)
-	}
+	// Create a new ZIP writer
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
 
-	// Rename to final extension if needed
-	if needsRename {
-		// Remove existing file if it exists
-		if _, err := os.Stat(zipPath); err == nil {
-			if err := os.Remove(zipPath); err != nil {
-				return fmt.Errorf("failed to remove existing package: %w", err)
-			}
+	// Walk through the source directory and add files to the ZIP
+	err = filepath.Walk(sourceDir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
 		}
-		
-		if err := os.Rename(tempZipPath, zipPath); err != nil {
-			return fmt.Errorf("failed to rename archive to final package: %w", err)
+
+		// Calculate the relative path for the ZIP entry
+		relPath, err := filepath.Rel(sourceDir, path)
+		if err != nil {
+			return fmt.Errorf("failed to get relative path: %w", err)
 		}
+
+		// Skip the root directory itself
+		if relPath == "." {
+			return nil
+		}
+
+		// Use forward slashes for ZIP paths (standard)
+		zipEntryPath := filepath.ToSlash(relPath)
+
+		// Create file header
+		header, err := zip.FileInfoHeader(info)
+		if err != nil {
+			return fmt.Errorf("failed to create file header for %s: %w", relPath, err)
+		}
+
+		// Set the name to the relative path with forward slashes
+		header.Name = zipEntryPath
+
+		if info.IsDir() {
+			// Directories should end with /
+			header.Name += "/"
+			header.Method = zip.Store
+		} else {
+			// Use Deflate compression for files
+			header.Method = zip.Deflate
+		}
+
+		// Create the entry in the ZIP file
+		writer, err := zipWriter.CreateHeader(header)
+		if err != nil {
+			return fmt.Errorf("failed to create ZIP entry for %s: %w", relPath, err)
+		}
+
+		// If it's a directory, we're done
+		if info.IsDir() {
+			return nil
+		}
+
+		// Copy file contents to the ZIP
+		file, err := os.Open(path)
+		if err != nil {
+			return fmt.Errorf("failed to open file %s: %w", path, err)
+		}
+		defer file.Close()
+
+		_, err = io.Copy(writer, file)
+		if err != nil {
+			return fmt.Errorf("failed to write file %s to ZIP: %w", path, err)
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to walk source directory: %w", err)
 	}
 
 	return nil
