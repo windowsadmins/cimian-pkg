@@ -21,7 +21,7 @@ const (
 	colorReset  = "\033[0m"
 	colorRed    = "\033[31m"
 	colorYellow = "\033[33m"
-	colorBlue   = "\033[34m"
+	colorCyan   = "\033[36m"
 	colorGreen  = "\033[32m"
 )
 
@@ -91,9 +91,9 @@ func (l *Logger) Warning(format string, v ...interface{}) {
 	l.colorPrintf(colorYellow, format, v...)
 }
 
-// Debug prints a debug message in blue
+// Debug prints a debug message in cyan
 func (l *Logger) Debug(format string, v ...interface{}) {
-	l.colorPrintf(colorBlue, format, v...)
+	l.colorPrintf(colorCyan, format, v...)
 }
 
 // Fatal prints an error message in red and exits
