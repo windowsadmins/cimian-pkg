@@ -354,6 +354,50 @@ func generateEnvironmentVariablesScript(envVars map[string]string) string {
 	return sb.String()
 }
 
+// DynamicVersion provides functions for generating dynamic date/time based version strings
+type DynamicVersion struct{}
+
+// Timestamp returns the current date/time formatted as YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
+func (DynamicVersion) Timestamp() string {
+	return time.Now().Format("2006.01.02.1504")
+}
+
+// Date returns the current date formatted as YYYY.MM.DD (e.g., 2025.12.09)
+func (DynamicVersion) Date() string {
+	return time.Now().Format("2006.01.02")
+}
+
+// DateTime returns the current date/time formatted as YYYY.MM.DD.HHMMSS (e.g., 2025.12.09.145530)
+func (DynamicVersion) DateTime() string {
+	return time.Now().Format("2006.01.02.150405")
+}
+
+// processDynamicVersionPlaceholders replaces dynamic version placeholders in the version field
+// Supported placeholders:
+//   - ${TIMESTAMP} -> YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
+//   - ${DATE} -> YYYY.MM.DD (e.g., 2025.12.09)
+//   - ${DATETIME} -> YYYY.MM.DD.HHMMSS (e.g., 2025.12.09.145530)
+func processDynamicVersionPlaceholders(version string) string {
+	dv := DynamicVersion{}
+	
+	// Process ${TIMESTAMP} -> YYYY.MM.DD.HHMM
+	if strings.Contains(version, "${TIMESTAMP}") {
+		version = strings.ReplaceAll(version, "${TIMESTAMP}", dv.Timestamp())
+	}
+	
+	// Process ${DATE} -> YYYY.MM.DD
+	if strings.Contains(version, "${DATE}") {
+		version = strings.ReplaceAll(version, "${DATE}", dv.Date())
+	}
+	
+	// Process ${DATETIME} -> YYYY.MM.DD.HHMMSS
+	if strings.Contains(version, "${DATETIME}") {
+		version = strings.ReplaceAll(version, "${DATETIME}", dv.DateTime())
+	}
+	
+	return version
+}
+
 // readBuildInfo reads and parses the build-info.yaml file from the project directory.
 func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	path := filepath.Join(projectDir, "build-info.yaml")
@@ -365,6 +409,15 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 	var buildInfo BuildInfo
 	if err := yaml.Unmarshal(data, &buildInfo); err != nil {
 		return nil, fmt.Errorf("error parsing YAML: %w", err)
+	}
+
+	// Process dynamic version placeholders in the version field
+	// This allows build-info.yaml to use ${TIMESTAMP}, ${DATE}, or ${DATETIME}
+	// for automatic versioning based on build time
+	originalVersion := buildInfo.Product.Version
+	buildInfo.Product.Version = processDynamicVersionPlaceholders(buildInfo.Product.Version)
+	if originalVersion != buildInfo.Product.Version {
+		logger.Debug("Resolved dynamic version: %s -> %s", originalVersion, buildInfo.Product.Version)
 	}
 
 	// Sanitize install_location to handle YAML parsing quirks with backslashes

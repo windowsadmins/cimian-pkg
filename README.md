@@ -119,7 +119,14 @@ Here’s the **Field Descriptions** section updated with the `description` field
   A unique identifier in reverse-domain style (e.g., `com.cimiancorp.cimian`). This ensures the package is correctly recognized by the system and prevents naming conflicts.
 
 - **`version`**:  
-  Supports **semantic versioning** (e.g., `1.0.0`) or **date-based versioning** (e.g., `2024.10.11`). Used to determine whether a new installation or update is required during deployments.
+  Supports **semantic versioning** (e.g., `1.0.0`) or **date-based versioning** (e.g., `2024.10.11`). Used to determine whether a new installation or update is required during deployments.  
+  
+  **Dynamic Version Placeholders**: You can use placeholders that are automatically resolved at build time:
+  - `${TIMESTAMP}` → `YYYY.MM.DD.HHMM` (e.g., `2025.12.17.1435`)
+  - `${DATE}` → `YYYY.MM.DD` (e.g., `2025.12.17`)
+  - `${DATETIME}` → `YYYY.MM.DD.HHMMSS` (e.g., `2025.12.17.143530`)
+  
+  Example: `version: "${TIMESTAMP}"` will produce a version like `2025.12.17.1435`
 
 - **`name`**:  
   The display name of the product. This name will be visible during installation and in package managers like Chocolatey.
