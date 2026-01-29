@@ -4,6 +4,8 @@
 
 This tool simplifies deployment complexities by providing YAML-based configuration, script-based actions, and **NuGet-style cryptographic signing** for package integrity verification.
 
+> **⚠️ IMPORTANT**: Scripts must access payload files via `$env:payloadRoot` environment variable. See [Script Execution](#accessing-payload-files-in-scripts) section for details.
+
 ### Package Formats
 
 - **`.pkg` (default)**: Modern ZIP-based packages compatible with **[sbin-installer](https://github.com/windowsadmins/sbin-installer)**
@@ -110,7 +112,17 @@ install_location: "C:\Program Files\Cimian"
 postinstall_action: "none"
 signing_certificate: "Cimian Corp EV Certificate"
 ```
+**Dynamic Versioning Example**: Use placeholders for automatic build-time versioning:
 
+```yaml
+product:
+  name: "Cimian-${version}"          # Resolves to "Cimian-2025.12.17.1435"
+  version: "${TIMESTAMP}"             # Resolves to "2025.12.17.1435"
+  identifier: "com.cimiancorp.cimian"
+  developer: "Cimian Corp"
+install_location: "C:\Program Files\Cimian"
+postinstall_action: "none"
+```
 Here’s the **Field Descriptions** section updated with the `description` field information directly included.
 
 #### Field Descriptions
@@ -130,6 +142,11 @@ Here’s the **Field Descriptions** section updated with the `description` field
 
 - **`name`**:  
   The display name of the product. This name will be visible during installation and in package managers like Chocolatey.
+  
+  **Version Placeholder**: You can use `${version}` in the name field to include the resolved version:
+  - `name: "MyPackage-${version}"` → `MyPackage-2025.12.17.1435` (when combined with `version: "${TIMESTAMP}"`)
+  
+  This is especially useful when combined with dynamic version placeholders to create automatically versioned package names.
 
 - **`developer`**:  
   The organization or individual distributing the package. This helps users identify the source of the software and improves trust.
@@ -174,7 +191,44 @@ This command will:
 
 - **Post-Install**:  
   `scripts/postinstall.ps1` runs **after** installation (acts like Chocolatey’s `chocolateyInstall.ps1`).
+#### Accessing Payload Files in Scripts
 
+**CRITICAL**: When using **sbin-installer** to install `.pkg` packages, scripts must access payload files through the `$env:payloadRoot` environment variable:
+
+```powershell
+# REQUIRED: Get payload directory from environment variable
+$payloadRoot = $env:payloadRoot
+
+# Now you can access payload files
+$setupExe = Join-Path $payloadRoot "setup.exe"
+Start-Process -FilePath $setupExe -ArgumentList "/silent" -Wait
+```
+
+**Why this is needed:**
+- sbin-installer extracts the `.pkg` to a temporary directory
+- It sets `$env:payloadRoot` to point to the `payload/` subdirectory
+- Scripts run with this environment variable available
+- Without this, scripts will fail with "variable not defined" errors
+
+**Common mistake:**
+```powershell
+# ❌ WRONG - $payloadRoot is undefined
+$setupExe = Join-Path $payloadRoot "setup.exe"
+
+# ✅ CORRECT - Get from environment variable first
+$payloadRoot = $env:payloadRoot
+$setupExe = Join-Path $payloadRoot "setup.exe"
+```
+
+**For installer-type packages** (where `install_location` is empty):
+- Payload files remain in the extraction directory
+- Scripts process installers directly from `$env:payloadRoot`
+- Example: `Join-Path $env:payloadRoot "setup.exe"`
+
+**For copy-type packages** (where `install_location` has a value):
+- Files are copied to the specified location FIRST
+- Then postinstall scripts run
+- Use `$env:payloadRoot` in preinstall, regular paths in postinstall
 ### Package Signing with `SignTool`
 
 If a signing certificate is provided, `cimipkg` will sign the package using Windows `SignTool`.
