@@ -420,6 +420,14 @@ func readBuildInfo(projectDir string) (*BuildInfo, error) {
 		logger.Debug("Resolved dynamic version: %s -> %s", originalVersion, buildInfo.Product.Version)
 	}
 
+	// Process ${version} placeholder in the name field
+	// This allows build-info.yaml to use name patterns like "MyPackage-${version}"
+	if strings.Contains(buildInfo.Product.Name, "${version}") {
+		originalName := buildInfo.Product.Name
+		buildInfo.Product.Name = strings.ReplaceAll(buildInfo.Product.Name, "${version}", buildInfo.Product.Version)
+		logger.Debug("Resolved name with version: %s -> %s", originalName, buildInfo.Product.Name)
+	}
+
 	// Sanitize install_location to handle YAML parsing quirks with backslashes
 	// YAML may mangle unquoted paths like "C:\ProgramData" into just "\" 
 	// because \P is treated as an escape sequence
