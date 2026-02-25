@@ -1,8 +1,0 @@
-product:
-  name: "Cimian"
-  version: "2024.10.11"
-  identifier: "com.cimiancorp.cimian"
-  publisher: "Cimian Corp"
-install_location: "C:\Program Files\Cimian"
-postinstall_action: "none"
-signing_certificate: "Cimian Corp EV Certificate"
