@@ -1,4 +1,24 @@
+## Build output
 bin/
-*.exe
-*.nupkg
+obj/
+release/
+build/
+output/
+
+## IDE
+.vs/
+.vscode/
+*.user
+*.suo
+
+## OS
+Thumbs.db
+Desktop.ini
 .DS_Store
+
+## NuGet
+*.nupkg
+packages/
+
+## Publish
+publish/
