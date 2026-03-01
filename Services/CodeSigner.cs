@@ -262,27 +262,35 @@ public class CodeSigner
     /// </summary>
     private string CalculateDirectoryHash(string directory)
     {
-        var sb = new StringBuilder();
+        // Must match ZipArchiveHelper.CalculateContentHash() exactly:
+        // - Forward slashes in paths (ZIP convention)
+        // - SortedDictionary with OrdinalIgnoreCase for deterministic order
+        // - Format: "path:hash|path:hash|" (pipe-separated with trailing pipe)
+        var hashes = new SortedDictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var sha256 = SHA256.Create();
 
         foreach (var filePath in Directory.EnumerateFiles(directory, "*", SearchOption.AllDirectories))
         {
-            // Skip build-info.yaml as it will be modified with the signature
             if (Path.GetFileName(filePath).Equals("build-info.yaml", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            var relativePath = Path.GetRelativePath(directory, filePath);
+            var relativePath = Path.GetRelativePath(directory, filePath).Replace('\\', '/');
             var fileBytes = File.ReadAllBytes(filePath);
             var fileHash = sha256.ComputeHash(fileBytes);
-            sb.Append(relativePath);
+            hashes[relativePath] = Convert.ToHexString(fileHash).ToLowerInvariant();
+        }
+
+        var sb = new StringBuilder();
+        foreach (var kvp in hashes)
+        {
+            sb.Append(kvp.Key);
             sb.Append(':');
-            sb.Append(Convert.ToHexString(fileHash).ToLowerInvariant());
+            sb.Append(kvp.Value);
             sb.Append('|');
         }
 
-        // Hash the combined file hashes
         var combinedHash = sha256.ComputeHash(Encoding.UTF8.GetBytes(sb.ToString()));
         return Convert.ToHexString(combinedHash).ToLowerInvariant();
     }
