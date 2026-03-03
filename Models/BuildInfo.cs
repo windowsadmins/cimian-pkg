@@ -21,9 +21,6 @@ public class BuildInfo
     /// </summary>
     public void DoSubstitutions()
     {
-        if (Product == null)
-            return;
-
         // Process dynamic version placeholders in the version field first
         // ${TIMESTAMP} -> YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
         if (!string.IsNullOrEmpty(Product.Version) && Product.Version.Contains("${TIMESTAMP}"))
@@ -70,6 +67,32 @@ public class BuildInfo
                 Product.Name = Product.Name.Replace("${version}", Product.Version);
             }
         }
+
+        // Process substitutions in identifier
+        if (!string.IsNullOrEmpty(Product.Identifier))
+        {
+            if (Product.Identifier.Contains("${version}") && !string.IsNullOrEmpty(Product.Version))
+                Product.Identifier = Product.Identifier.Replace("${version}", Product.Version);
+            if (Product.Identifier.Contains("${TIMESTAMP}"))
+                Product.Identifier = Product.Identifier.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
+            if (Product.Identifier.Contains("${DATE}"))
+                Product.Identifier = Product.Identifier.Replace("${DATE}", DynamicVersion.Date);
+            if (Product.Identifier.Contains("${DATETIME}"))
+                Product.Identifier = Product.Identifier.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
+        }
+
+        // Process substitutions in description
+        if (!string.IsNullOrEmpty(Product.Description))
+        {
+            if (Product.Description.Contains("${version}") && !string.IsNullOrEmpty(Product.Version))
+                Product.Description = Product.Description.Replace("${version}", Product.Version);
+            if (Product.Description.Contains("${TIMESTAMP}"))
+                Product.Description = Product.Description.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
+            if (Product.Description.Contains("${DATE}"))
+                Product.Description = Product.Description.Replace("${DATE}", DynamicVersion.Date);
+            if (Product.Description.Contains("${DATETIME}"))
+                Product.Description = Product.Description.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
+        }
     }
 
     /// <summary>
@@ -105,7 +128,7 @@ public class BuildInfo
 
     /// <summary>
     /// Action to perform after installation.
-    /// Values: none, logout, shutdown, restart
+    /// Values: none, script, logout, shutdown, restart
     /// </summary>
     [YamlMember(Alias = "postinstall_action")]
     public string? PostinstallAction { get; set; }
@@ -127,12 +150,6 @@ public class BuildInfo
     /// </summary>
     [YamlMember(Alias = "signature")]
     public PackageSignature? Signature { get; set; }
-
-    /// <summary>
-    /// Description of the package.
-    /// </summary>
-    [YamlMember(Alias = "description")]
-    public string? Description { get; set; }
 
     /// <summary>
     /// Minimum OS version requirement.
@@ -198,6 +215,12 @@ public class ProductInfo
     /// </summary>
     [YamlMember(Alias = "identifier")]
     public string Identifier { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Human-readable description of the product.
+    /// </summary>
+    [YamlMember(Alias = "description")]
+    public string? Description { get; set; }
 
     /// <summary>
     /// Installer type (msi, exe, etc.) - indicates this is an installer package.
