@@ -176,9 +176,9 @@ $toolsDir = ""$(Split-Path -Parent $MyInvocation.MyCommand.Definition)""
         sb.AppendLine($@"    <authors>{EscapeXml(buildInfo.Product.Developer ?? "Unknown")}</authors>");
         sb.AppendLine($@"    <owners>{EscapeXml(buildInfo.Product.Developer ?? "Unknown")}</owners>");
 
-        if (!string.IsNullOrEmpty(buildInfo.Description))
+        if (!string.IsNullOrEmpty(buildInfo.Product.Description))
         {
-            sb.AppendLine($@"    <description>{EscapeXml(buildInfo.Description)}</description>");
+            sb.AppendLine($@"    <description>{EscapeXml(buildInfo.Product.Description)}</description>");
         }
         else
         {
