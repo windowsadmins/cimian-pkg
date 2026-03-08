@@ -168,7 +168,7 @@ $toolsDir = ""$(Split-Path -Parent $MyInvocation.MyCommand.Definition)""
 
         var sb = new StringBuilder();
         sb.AppendLine(@"<?xml version=""1.0"" encoding=""utf-8""?>");
-        sb.AppendLine(@"<package xmlns=""http://schemas.microsoft.com/packaging/2015/06/nuspec.xsd"">");
+        sb.AppendLine(@"<package xmlns=""http://schemas.microsoft.com/packaging/2011/08/nuspec.xsd"">");
         sb.AppendLine(@"  <metadata>");
         sb.AppendLine($@"    <id>{EscapeXml(buildInfo.Product.Identifier)}</id>");
         sb.AppendLine($@"    <version>{EscapeXml(buildInfo.Product.Version)}</version>");
