@@ -62,6 +62,10 @@ class Program
             aliases: ["--nupkg"],
             description: "Build legacy .nupkg format (default is .pkg)");
 
+        var msiOption = new Option<bool>(
+            aliases: ["--msi"],
+            description: "Build .msi format (Windows Installer)");
+
         var intunewinOption = new Option<bool>(
             aliases: ["--intunewin"],
             description: "Also generate .intunewin from .nupkg (only works with --nupkg)");
@@ -69,6 +73,14 @@ class Program
         var envOption = new Option<string?>(
             aliases: ["--env", "-e"],
             description: "Path to .env file containing environment variables");
+
+        var signThumbprintOption = new Option<string?>(
+            aliases: ["--sign-thumbprint"],
+            description: "Certificate thumbprint for signing (overrides build-info.yaml)");
+
+        var signCertOption = new Option<string?>(
+            aliases: ["--sign-cert"],
+            description: "Certificate subject name for signing (overrides build-info.yaml)");
 
         // Create command
         var createOption = new Option<string?>(
@@ -90,6 +102,9 @@ class Program
 
         rootCommand.AddArgument(projectDirArg);
         rootCommand.AddOption(nupkgOption);
+        rootCommand.AddOption(msiOption);
+        rootCommand.AddOption(signThumbprintOption);
+        rootCommand.AddOption(signCertOption);
         rootCommand.AddOption(intunewinOption);
         rootCommand.AddOption(envOption);
         rootCommand.AddOption(createOption);
@@ -102,12 +117,15 @@ class Program
             var verbose = context.ParseResult.GetValueForOption(verboseOption);
             var projectDir = context.ParseResult.GetValueForArgument(projectDirArg);
             var buildNupkg = context.ParseResult.GetValueForOption(nupkgOption);
+            var buildMsi = context.ParseResult.GetValueForOption(msiOption);
             var buildIntunewin = context.ParseResult.GetValueForOption(intunewinOption);
             var envFile = context.ParseResult.GetValueForOption(envOption);
             var createPath = context.ParseResult.GetValueForOption(createOption);
             var resignPath = context.ParseResult.GetValueForOption(resignOption);
             var resignCert = context.ParseResult.GetValueForOption(resignCertOption);
             var resignThumbprint = context.ParseResult.GetValueForOption(resignThumbprintOption);
+            var signThumbprint = context.ParseResult.GetValueForOption(signThumbprintOption);
+            var signCert = context.ParseResult.GetValueForOption(signCertOption);
 
             // Set up logging with clean output (like Go binaries)
             var logLevel = verbose ? LogLevel.Debug : LogLevel.Information;
@@ -171,9 +189,12 @@ class Program
                 var options = new PackageBuildOptions
                 {
                     BuildNupkg = buildNupkg,
+                    BuildMsi = buildMsi,
                     BuildIntunewin = buildIntunewin,
                     EnvFilePath = envFile,
-                    Verbose = verbose
+                    Verbose = verbose,
+                    SigningThumbprint = signThumbprint,
+                    SigningCertificate = signCert
                 };
 
                 var packagePath = packageBuilder.Build(projectDir, options);
