@@ -264,7 +264,7 @@ public class MsiBuilder
         // Cimian-specific properties
         SetProperty("CIMIAN_IDENTIFIER", identifier);
         SetProperty("CIMIAN_FULL_VERSION", fullVersion);
-        SetProperty("CIMIAN_BUILD_INFO", buildInfoYaml);
+        SetProperty("CIMIAN_PKG_BUILD_INFO", buildInfoYaml);
 
         // Upgrade-related
         SetProperty("PREVIOUSVERSIONSINSTALLED", "");

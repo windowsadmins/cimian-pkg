@@ -19,7 +19,7 @@ public class MsiPropertyReader
 
     /// <summary>
     /// Extract all standard metadata from an MSI file.
-    /// For cimipkg-built MSI, also extracts the embedded CIMIAN_BUILD_INFO YAML.
+    /// For cimipkg-built MSI, also extracts the embedded CIMIAN_PKG_BUILD_INFO YAML.
     /// </summary>
     public MsiMetadata ReadMetadata(string msiPath)
     {
@@ -42,7 +42,7 @@ public class MsiPropertyReader
             metadata.Description = ReadProperty(db, "ARPCOMMENTS") ?? string.Empty;
 
             // Cimian-specific properties
-            metadata.BuildInfoYaml = ReadProperty(db, "CIMIAN_BUILD_INFO");
+            metadata.BuildInfoYaml = ReadProperty(db, "CIMIAN_PKG_BUILD_INFO");
             metadata.FullVersion = ReadProperty(db, "CIMIAN_FULL_VERSION") ?? metadata.ProductVersion;
             metadata.Identifier = ReadProperty(db, "CIMIAN_IDENTIFIER") ?? string.Empty;
 

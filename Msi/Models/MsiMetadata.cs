@@ -18,7 +18,7 @@ public class MsiMetadata
     public string? BuildInfoYaml { get; set; }
 
     /// <summary>
-    /// Whether this MSI was built by cimipkg (has CIMIAN_BUILD_INFO property).
+    /// Whether this MSI was built by cimipkg (has CIMIAN_PKG_BUILD_INFO property).
     /// </summary>
     public bool IsCimianPackage => !string.IsNullOrEmpty(BuildInfoYaml);
 
