@@ -14,7 +14,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\shared\msi\Cimian.Msi.csproj" />
+    <ProjectReference Include="Msi\Cimian.Msi.csproj" />
   </ItemGroup>
 
   <ItemGroup>
