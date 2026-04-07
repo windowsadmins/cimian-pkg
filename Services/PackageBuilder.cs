@@ -74,6 +74,12 @@ public class PackageBuilder
         // Process dynamic version placeholders (${TIMESTAMP}, ${DATE}, ${DATETIME})
         buildInfo.DoSubstitutions();
 
+        // CLI signing overrides (take precedence over build-info.yaml)
+        if (!string.IsNullOrEmpty(options.SigningThumbprint))
+            buildInfo.SigningThumbprint = options.SigningThumbprint;
+        if (!string.IsNullOrEmpty(options.SigningCertificate))
+            buildInfo.SigningCertificate = options.SigningCertificate;
+
         // Load environment variables
         var envVars = LoadEnvironmentVariables(projectDir, options.EnvFilePath);
         if (envVars.Count > 0)
@@ -88,15 +94,16 @@ public class PackageBuilder
         // Determine if this is an installer package
         var isInstallerPackage = buildInfo.IsInstallerPackage || !hasPayloadFiles;
 
-        // Validate configuration
-        if (hasPayloadFiles && !isInstallerPackage && string.IsNullOrEmpty(buildInfo.InstallLocation))
+        // Validate configuration (MSI builds handle empty install_location via staging directory)
+        if (hasPayloadFiles && !isInstallerPackage && string.IsNullOrEmpty(buildInfo.InstallLocation)
+            && !options.BuildMsi)
         {
             throw new InvalidOperationException(
                 "install_location must be specified when payload exists and the package is not an installer.");
         }
 
         // Parse and normalize version
-        var packageFormat = options.BuildNupkg ? "nupkg" : "pkg";
+        var packageFormat = options.BuildMsi ? "msi" : options.BuildNupkg ? "nupkg" : "pkg";
         var versionResult = VersionParser.Parse(buildInfo.Product.Version, packageFormat);
 
         _logger.LogInformation("Version from timestamp: {Original}", versionResult.OriginalVersion);
@@ -107,7 +114,14 @@ public class PackageBuilder
 
         // Build the appropriate package format
         string packagePath;
-        if (options.BuildNupkg)
+        if (options.BuildMsi)
+        {
+            _logger.LogInformation("Building .msi format (Windows Installer)");
+            var msiBuilder = new MsiBuilder(_logger, _codeSigner, _scriptProcessor, _yamlSerializer);
+            packagePath = msiBuilder.Build(buildInfo, projectDir, versionResult.OriginalVersion,
+                hasPayloadFiles, envVars);
+        }
+        else if (options.BuildNupkg)
         {
             _logger.LogInformation("Building .nupkg format (Chocolatey compatible)");
             packagePath = BuildNupkgPackage(buildInfo, projectDir, versionResult.OriginalVersion,
@@ -775,6 +789,11 @@ public record PackageBuildOptions
     public bool BuildNupkg { get; init; }
 
     /// <summary>
+    /// Build .msi format (Windows Installer).
+    /// </summary>
+    public bool BuildMsi { get; init; }
+
+    /// <summary>
     /// Also generate .intunewin from .nupkg (only with BuildNupkg).
     /// </summary>
     public bool BuildIntunewin { get; init; }
@@ -788,4 +807,14 @@ public record PackageBuildOptions
     /// Enable verbose logging.
     /// </summary>
     public bool Verbose { get; init; }
+
+    /// <summary>
+    /// Certificate thumbprint for signing (overrides build-info.yaml).
+    /// </summary>
+    public string? SigningThumbprint { get; init; }
+
+    /// <summary>
+    /// Certificate subject name for signing (overrides build-info.yaml).
+    /// </summary>
+    public string? SigningCertificate { get; init; }
 }

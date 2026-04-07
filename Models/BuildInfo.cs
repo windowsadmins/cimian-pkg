@@ -182,6 +182,19 @@ public class BuildInfo
     public bool OverrideUninstallScript { get; set; }
 
     /// <summary>
+    /// Explicit UpgradeCode GUID for MSI packages.
+    /// If not specified, a deterministic GUID is generated from product.identifier.
+    /// </summary>
+    [YamlMember(Alias = "upgrade_code")]
+    public string? UpgradeCode { get; set; }
+
+    /// <summary>
+    /// Additional custom MSI properties to embed.
+    /// </summary>
+    [YamlMember(Alias = "msi_properties")]
+    public Dictionary<string, string>? MsiProperties { get; set; }
+
+    /// <summary>
     /// Determines if this is an installer package based on installer_type.
     /// </summary>
     public bool IsInstallerPackage => !string.IsNullOrEmpty(Product?.InstallerType);
