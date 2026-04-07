@@ -1,6 +1,6 @@
 using YamlDotNet.Serialization;
 
-namespace Cimian.Msi.Models;
+namespace Cimian.CLI.Cimipkg.Models;
 
 /// <summary>
 /// Installation receipt stored at %ProgramData%\ManagedInstalls\Receipts\{identifier}.yaml.

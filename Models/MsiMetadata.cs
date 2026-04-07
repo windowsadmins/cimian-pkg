@@ -1,4 +1,4 @@
-namespace Cimian.Msi.Models;
+namespace Cimian.CLI.Cimipkg.Models;
 
 /// <summary>
 /// Metadata extracted from or written to an MSI database Property table.
