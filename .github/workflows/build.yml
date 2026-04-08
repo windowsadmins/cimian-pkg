@@ -1,13 +1,10 @@
-name: Build and Release
+name: Build
 
 on:
   push:
     branches: [main]
   pull_request:
     branches: [main]
-
-permissions:
-  contents: write
 
 jobs:
   build:
@@ -41,29 +38,3 @@ jobs:
         with:
           name: cimipkg-${{ matrix.arch }}
           path: publish/cimipkg-${{ matrix.arch }}.exe
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: release
-          merge-multiple: true
-
-      - name: Generate version
-        id: version
-        run: echo "version=$(date -u +'%Y.%m.%d.%H%M')" >> $GITHUB_OUTPUT
-
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: cimipkg ${{ steps.version.outputs.version }}
-          generate_release_notes: true
-          files: |
-            release/cimipkg-win-x64.exe
-            release/cimipkg-win-arm64.exe
