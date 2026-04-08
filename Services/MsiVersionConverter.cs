@@ -25,8 +25,12 @@ public static partial class MsiVersionConverter
 
         var fullVersion = version.Trim();
 
+        // Strip SemVer build metadata (+anything) before parsing
+        var plusIdx = fullVersion.IndexOf('+');
+        var parseable = plusIdx >= 0 ? fullVersion[..plusIdx] : fullVersion;
+
         // Try date-based: YYYY.MM.DD or YYYY.MM.DD.HHMM or YYYY.MM.DD.revision
-        var dateMatch = DateVersionRegex().Match(fullVersion);
+        var dateMatch = DateVersionRegex().Match(parseable);
         if (dateMatch.Success)
         {
             var year = int.Parse(dateMatch.Groups[1].Value);
@@ -69,7 +73,7 @@ public static partial class MsiVersionConverter
         }
 
         // Try semantic: X.Y.Z or X.Y.Z.W (may have prerelease suffix)
-        var semMatch = SemanticVersionRegex().Match(fullVersion);
+        var semMatch = SemanticVersionRegex().Match(parseable);
         if (semMatch.Success)
         {
             var major = int.Parse(semMatch.Groups[1].Value);
@@ -85,7 +89,7 @@ public static partial class MsiVersionConverter
         }
 
         // Fallback: try to use as-is, or default to 1.0.0
-        return IsValidMsiVersion(fullVersion) ? (fullVersion, fullVersion) : ("1.0.0", fullVersion);
+        return IsValidMsiVersion(parseable) ? (parseable, fullVersion) : ("1.0.0", fullVersion);
     }
 
     /// <summary>
