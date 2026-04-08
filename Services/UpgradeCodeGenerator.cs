@@ -1,7 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 
-namespace Cimian.Msi.Services;
+namespace Cimian.CLI.Cimipkg.Services;
 
 /// <summary>
 /// Generates deterministic UpgradeCodes from product identifiers using UUID v5 (SHA-1 namespace).

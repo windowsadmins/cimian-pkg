@@ -1,9 +1,9 @@
-using Cimian.Msi.Models;
+using Cimian.CLI.Cimipkg.Models;
 using Microsoft.Extensions.Logging;
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
-namespace Cimian.Msi.Services;
+namespace Cimian.CLI.Cimipkg.Services;
 
 /// <summary>
 /// Manages Cimian receipt files at %ProgramData%\ManagedInstalls\Receipts\.
