@@ -33,13 +33,14 @@ jobs:
 
       - name: Publish
         run: |
-          dotnet publish -c Release -r ${{ matrix.arch }} --self-contained -o publish/${{ matrix.arch }} -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          dotnet publish -c Release -r ${{ matrix.arch }} --self-contained -o publish -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true
+          Compress-Archive -Path publish/cimipkg.exe -DestinationPath "publish/cimipkg-${{ matrix.arch }}.zip"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: cimipkg-${{ matrix.arch }}
-          path: publish/${{ matrix.arch }}/cimipkg.exe
+          path: publish/cimipkg-${{ matrix.arch }}.zip
 
   release:
     needs: build
@@ -47,28 +48,30 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name == 'push'
 
     steps:
-      - name: Download x64 artifact
+      - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
-          name: cimipkg-win-x64
-          path: release/x64
-
-      - name: Download arm64 artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cimipkg-win-arm64
-          path: release/arm64
+          path: release
+          merge-multiple: true
 
       - name: Generate version
         id: version
         run: echo "version=$(date -u +'%Y.%m.%d.%H%M')" >> $GITHUB_OUTPUT
 
       - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.version.outputs.version }}
-          name: cimipkg ${{ steps.version.outputs.version }}
-          generate_release_notes: true
-          files: |
-            release/x64/cimipkg.exe
-            release/arm64/cimipkg.exe
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --repo "${{ github.repository }}" \
+            --title "cimipkg ${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            --latest \
+            release/cimipkg-win-x64.zip \
+            release/cimipkg-win-arm64.zip
+
+      - name: Delete tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/v${{ steps.version.outputs.version }}" || true
