@@ -58,13 +58,13 @@ class Program
         projectDirArg.SetDefaultValue(".");
 
         // Build options
+        var pkgOption = new Option<bool>(
+            aliases: ["--pkg"],
+            description: "Build .pkg format (default is .msi)");
+
         var nupkgOption = new Option<bool>(
             aliases: ["--nupkg"],
-            description: "Build legacy .nupkg format (default is .pkg)");
-
-        var msiOption = new Option<bool>(
-            aliases: ["--msi"],
-            description: "Build .msi format (Windows Installer)");
+            description: "Build .nupkg format (Chocolatey compatible)");
 
         var intunewinOption = new Option<bool>(
             aliases: ["--intunewin"],
@@ -101,8 +101,8 @@ class Program
             description: "Certificate thumbprint for re-signing");
 
         rootCommand.AddArgument(projectDirArg);
+        rootCommand.AddOption(pkgOption);
         rootCommand.AddOption(nupkgOption);
-        rootCommand.AddOption(msiOption);
         rootCommand.AddOption(signThumbprintOption);
         rootCommand.AddOption(signCertOption);
         rootCommand.AddOption(intunewinOption);
@@ -116,8 +116,8 @@ class Program
         {
             var verbose = context.ParseResult.GetValueForOption(verboseOption);
             var projectDir = context.ParseResult.GetValueForArgument(projectDirArg);
+            var buildPkg = context.ParseResult.GetValueForOption(pkgOption);
             var buildNupkg = context.ParseResult.GetValueForOption(nupkgOption);
-            var buildMsi = context.ParseResult.GetValueForOption(msiOption);
             var buildIntunewin = context.ParseResult.GetValueForOption(intunewinOption);
             var envFile = context.ParseResult.GetValueForOption(envOption);
             var createPath = context.ParseResult.GetValueForOption(createOption);
@@ -188,8 +188,8 @@ class Program
 
                 var options = new PackageBuildOptions
                 {
+                    BuildPkg = buildPkg,
                     BuildNupkg = buildNupkg,
-                    BuildMsi = buildMsi,
                     BuildIntunewin = buildIntunewin,
                     EnvFilePath = envFile,
                     Verbose = verbose,

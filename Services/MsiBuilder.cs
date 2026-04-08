@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.Text;
 using Cimian.CLI.Cimipkg.Models;
-using Cimian.Msi.Services;
 using Microsoft.Extensions.Logging;
 using WixToolset.Dtf.WindowsInstaller;
 using YamlDotNet.Serialization;

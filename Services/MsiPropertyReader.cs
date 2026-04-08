@@ -1,8 +1,8 @@
-using Cimian.Msi.Models;
+using Cimian.CLI.Cimipkg.Models;
 using Microsoft.Extensions.Logging;
 using WixToolset.Dtf.WindowsInstaller;
 
-namespace Cimian.Msi.Services;
+namespace Cimian.CLI.Cimipkg.Services;
 
 /// <summary>
 /// Reads metadata from MSI databases using DTF.

@@ -1,6 +1,6 @@
 using System.Text.RegularExpressions;
 
-namespace Cimian.Msi.Services;
+namespace Cimian.CLI.Cimipkg.Services;
 
 /// <summary>
 /// Converts version strings to MSI-compatible format.
