@@ -94,16 +94,17 @@ public class PackageBuilder
         // Determine if this is an installer package
         var isInstallerPackage = buildInfo.IsInstallerPackage || !hasPayloadFiles;
 
-        // Validate configuration (MSI builds handle empty install_location via staging directory)
+        // Validate configuration (MSI and pkg handle empty install_location differently)
+        var buildingMsi = !options.BuildPkg && !options.BuildNupkg;
         if (hasPayloadFiles && !isInstallerPackage && string.IsNullOrEmpty(buildInfo.InstallLocation)
-            && !options.BuildMsi)
+            && !buildingMsi)
         {
             throw new InvalidOperationException(
                 "install_location must be specified when payload exists and the package is not an installer.");
         }
 
         // Parse and normalize version
-        var packageFormat = options.BuildMsi ? "msi" : options.BuildNupkg ? "nupkg" : "pkg";
+        var packageFormat = buildingMsi ? "msi" : options.BuildNupkg ? "nupkg" : "pkg";
         var versionResult = VersionParser.Parse(buildInfo.Product.Version, packageFormat);
 
         _logger.LogInformation("Version from timestamp: {Original}", versionResult.OriginalVersion);
@@ -112,14 +113,17 @@ public class PackageBuilder
         // Update buildInfo with normalized version for .nuspec compatibility
         buildInfo.Product.Version = versionResult.NormalizedVersion;
 
-        // Build the appropriate package format
+        // Build the appropriate package format (default: MSI)
         string packagePath;
-        if (options.BuildMsi)
+        if (options.BuildPkg)
         {
-            _logger.LogInformation("Building .msi format (Windows Installer)");
-            var msiBuilder = new MsiBuilder(_logger, _codeSigner, _scriptProcessor, _yamlSerializer);
-            packagePath = msiBuilder.Build(buildInfo, projectDir, versionResult.OriginalVersion,
-                hasPayloadFiles, envVars);
+            _logger.LogInformation("Building .pkg format (sbin-installer compatible)");
+            packagePath = BuildPkgPackage(buildInfo, projectDir, versionResult.OriginalVersion, envVars);
+
+            if (options.BuildIntunewin)
+            {
+                _logger.LogWarning("--intunewin flag is only supported with --nupkg format. Ignoring.");
+            }
         }
         else if (options.BuildNupkg)
         {
@@ -136,13 +140,10 @@ public class PackageBuilder
         }
         else
         {
-            _logger.LogInformation("Building .pkg format (sbin-installer compatible)");
-            packagePath = BuildPkgPackage(buildInfo, projectDir, versionResult.OriginalVersion, envVars);
-
-            if (options.BuildIntunewin)
-            {
-                _logger.LogWarning("--intunewin flag is only supported with --nupkg format. Ignoring.");
-            }
+            _logger.LogInformation("Building .msi format (Windows Installer)");
+            var msiBuilder = new MsiBuilder(_logger, _codeSigner, _scriptProcessor, _yamlSerializer);
+            packagePath = msiBuilder.Build(buildInfo, projectDir, versionResult.OriginalVersion,
+                hasPayloadFiles, envVars);
         }
 
         _logger.LogInformation("Package created successfully: {PackagePath}", packagePath);
@@ -784,14 +785,14 @@ exit $LASTEXITCODE
 public record PackageBuildOptions
 {
     /// <summary>
-    /// Build legacy .nupkg format (default is .pkg).
+    /// Build .pkg format (sbin-installer compatible). Default is .msi.
     /// </summary>
-    public bool BuildNupkg { get; init; }
+    public bool BuildPkg { get; init; }
 
     /// <summary>
-    /// Build .msi format (Windows Installer).
+    /// Build .nupkg format (Chocolatey compatible).
     /// </summary>
-    public bool BuildMsi { get; init; }
+    public bool BuildNupkg { get; init; }
 
     /// <summary>
     /// Also generate .intunewin from .nupkg (only with BuildNupkg).
