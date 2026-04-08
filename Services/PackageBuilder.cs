@@ -110,8 +110,13 @@ public class PackageBuilder
         _logger.LogInformation("Version from timestamp: {Original}", versionResult.OriginalVersion);
         _logger.LogDebug("Normalized version for package format: {Normalized}", versionResult.NormalizedVersion);
 
-        // Update buildInfo with normalized version for .nuspec compatibility
-        buildInfo.Product.Version = versionResult.NormalizedVersion;
+        // Update buildInfo with normalized version for .nuspec/.pkg compatibility
+        // For MSI, preserve the original version in buildInfo so CIMIAN_PKG_BUILD_INFO
+        // embeds the real version (MsiBuilder handles MSI version conversion separately)
+        if (!buildingMsi)
+        {
+            buildInfo.Product.Version = versionResult.NormalizedVersion;
+        }
 
         // Build the appropriate package format (default: MSI)
         string packagePath;
