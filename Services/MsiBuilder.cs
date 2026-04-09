@@ -403,8 +403,32 @@ public class MsiBuilder
             var cid = EscSql($"{{{componentId}}}");
             db.Execute($"INSERT INTO `Component` (`Component`, `ComponentId`, `Directory_`, `Attributes`, `Condition`, `KeyPath`) VALUES ('{EscSql(componentKey)}', '{cid}', '{EscSql(directoryRef)}', 256, '', '{EscSql(fileKey)}')");
 
+            // Extract PE FileVersion so Windows Installer's file versioning rules work.
+            // Without this, the File table Version column is empty and MSI treats the payload
+            // as "unversioned", which means it will refuse to overwrite a versioned file
+            // already on disk — the install "succeeds" but silently skips the file copy.
+            // Leave empty for truly unversioned files (scripts, txt, etc.).
+            var fileVersion = "";
+            try
+            {
+                var vi = System.Diagnostics.FileVersionInfo.GetVersionInfo(filePath);
+                var major = vi.FileMajorPart;
+                var minor = vi.FileMinorPart;
+                var build = vi.FileBuildPart;
+                var revision = vi.FilePrivatePart;
+                if (major > 0 || minor > 0 || build > 0 || revision > 0)
+                {
+                    // MSI requires each version part to be 0-65535
+                    fileVersion = $"{Math.Min(major, 65535)}.{Math.Min(minor, 65535)}.{Math.Min(build, 65535)}.{Math.Min(revision, 65535)}";
+                }
+            }
+            catch
+            {
+                // Unversioned file — fall back to empty, MSI will compare by modification time
+            }
+
             // File
-            db.Execute($"INSERT INTO `File` (`File`, `Component_`, `FileName`, `FileSize`, `Version`, `Language`, `Attributes`, `Sequence`) VALUES ('{EscSql(fileKey)}', '{EscSql(componentKey)}', '{EscSql(msiFileName)}', {fileSize}, '', '', 0, {sequence})");
+            db.Execute($"INSERT INTO `File` (`File`, `Component_`, `FileName`, `FileSize`, `Version`, `Language`, `Attributes`, `Sequence`) VALUES ('{EscSql(fileKey)}', '{EscSql(componentKey)}', '{EscSql(msiFileName)}', {fileSize}, '{EscSql(fileVersion)}', '', 0, {sequence})");
 
             // FeatureComponents
             db.Execute($"INSERT INTO `FeatureComponents` (`Feature_`, `Component_`) VALUES ('DefaultFeature', '{EscSql(componentKey)}')");
