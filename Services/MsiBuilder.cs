@@ -407,7 +407,9 @@ public class MsiBuilder
             // Without this, the File table Version column is empty and MSI treats the payload
             // as "unversioned", which means it will refuse to overwrite a versioned file
             // already on disk — the install "succeeds" but silently skips the file copy.
-            // Leave empty for truly unversioned files (scripts, txt, etc.).
+            // Truly unversioned files (scripts, txt, etc.) return zero parts from
+            // FileVersionInfo rather than throwing, so they take the "stays empty" branch
+            // naturally; the catch is only for genuine I/O or access problems.
             var fileVersion = "";
             try
             {
@@ -422,9 +424,19 @@ public class MsiBuilder
                     fileVersion = $"{Math.Min(major, 65535)}.{Math.Min(minor, 65535)}.{Math.Min(build, 65535)}.{Math.Min(revision, 65535)}";
                 }
             }
-            catch
+            catch (Exception ex) when (
+                ex is System.IO.IOException ||
+                ex is System.IO.FileNotFoundException ||
+                ex is UnauthorizedAccessException ||
+                ex is ArgumentException ||
+                ex is NotSupportedException)
             {
-                // Unversioned file — fall back to empty, MSI will compare by modification time
+                // Narrow set of expected I/O / access issues when reading PE metadata.
+                // Log + fall back to empty so MSI uses timestamp comparison — operators
+                // get a breadcrumb instead of a silent drop back to "unversioned".
+                _logger.LogWarning(
+                    "Failed to read PE file version for '{FilePath}': {Error}. MSI File.Version will be empty for this entry.",
+                    filePath, ex.Message);
             }
 
             // File
