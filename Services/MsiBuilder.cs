@@ -463,7 +463,13 @@ public class MsiBuilder
                 // Fallback: stamp unversioned files with the package version so MSI
                 // treats every cimipkg build as newer than whatever is on disk. This
                 // is what makes cimipkg MSIs the source of truth for their payloads.
-                fileVersion = msiVersion;
+                //
+                // MsiVersionConverter returns a 3-part MSI version (major.minor.build),
+                // but the MSI File.Version column is validated against the 4-part
+                // major.minor.build.revision shape. A 3-part value silently falls back
+                // to "unversioned" and the rule we are trying to avoid reasserts
+                // itself, so pad to 4 parts before writing.
+                fileVersion = NormalizeToFourPartVersion(msiVersion);
             }
 
             // File
@@ -638,6 +644,26 @@ public class MsiBuilder
     /// </summary>
     public static string BuildScriptActionVbs(string actionName, string scriptContent)
     {
+        // actionName is interpolated directly into both VBS string literals and the
+        // staged temp-file path, so reject anything that could break either surface.
+        // cimipkg only ever passes the fixed values CimianPreinstall /
+        // CimianPostinstall / CimianUninstall, but the method is public for tests
+        // and we want a loud failure rather than a corrupted MSI if a caller
+        // accidentally passes user-controlled data.
+        if (string.IsNullOrEmpty(actionName))
+        {
+            throw new ArgumentException("actionName must not be null or empty", nameof(actionName));
+        }
+        foreach (var c in actionName)
+        {
+            if (!char.IsLetterOrDigit(c) && c != '_' && c != '-')
+            {
+                throw new ArgumentException(
+                    $"actionName must only contain letters, digits, '_' or '-'; got '{actionName}'",
+                    nameof(actionName));
+            }
+        }
+
         // Encode as UTF-8 **with BOM** so PowerShell 5.1 reads the file reliably
         // when invoked via `powershell.exe -File`. Without a BOM, PS 5.1 falls back
         // to the system ANSI code page and mis-parses Unicode content — and because
@@ -702,8 +728,20 @@ public class MsiBuilder
         vbs.Append($"  Session.Log \"{actionName}: running \" & tmpFile\r\n");
         // ws.Run "powershell.exe" -NoProfile ... -File "<tmpFile>", 0, True
         // VBS quoting: "" produces a literal " inside a string literal, so """X""" = "X"
+        //
+        // Under `On Error Resume Next` a ws.Run() failure to even START the process
+        // (bad exe path, quoting bug, access denied) does not surface via `rc`;
+        // instead `Err.Number` gets set and `rc` is whatever was there before.
+        // Clear Err + seed rc with a sentinel so we can tell "ws.Run never ran" from
+        // "ws.Run ran and powershell exited with code N".
+        vbs.Append("  Err.Clear\r\n");
+        vbs.Append("  rc = -1\r\n");
         vbs.Append($"  rc = ws.Run(\"\"\"{psExe}\"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"\" & tmpFile & \"\"\"\", 0, True)\r\n");
-        vbs.Append($"  Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
+        vbs.Append("  If Err.Number <> 0 Then\r\n");
+        vbs.Append($"    Session.Log \"{actionName}: failed to start powershell: \" & Err.Number & \" - \" & Err.Description\r\n");
+        vbs.Append("  Else\r\n");
+        vbs.Append($"    Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
+        vbs.Append("  End If\r\n");
         vbs.Append("  Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         vbs.Append("  If fso.FileExists(tmpFile) Then fso.DeleteFile tmpFile\r\n");
         vbs.Append("End If\r\n");
@@ -854,6 +892,25 @@ public class MsiBuilder
     }
 
     private static string EscSql(string value) => value.Replace("'", "''");
+
+    /// <summary>
+    /// Pad an MSI product version to the 4-part major.minor.build.revision shape
+    /// required by the File table Version column. Inputs are trusted MSI versions
+    /// produced by <see cref="MsiVersionConverter.Convert"/>, so we only handle
+    /// the 2-part and 3-part shapes cimipkg actually emits today.
+    /// </summary>
+    private static string NormalizeToFourPartVersion(string version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return "0.0.0.0";
+        var parts = version.Split('.');
+        return parts.Length switch
+        {
+            1 => $"{parts[0]}.0.0.0",
+            2 => $"{parts[0]}.{parts[1]}.0.0",
+            3 => $"{parts[0]}.{parts[1]}.{parts[2]}.0",
+            _ => $"{parts[0]}.{parts[1]}.{parts[2]}.{parts[3]}",
+        };
+    }
 
     private static string SanitizeIdentifier(string input)
     {

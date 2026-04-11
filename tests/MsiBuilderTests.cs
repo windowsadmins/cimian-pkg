@@ -1,7 +1,6 @@
 using System;
 using System.Linq;
 using System.Text;
-using System.Xml;
 using Cimian.CLI.Cimipkg.Services;
 using Xunit;
 
@@ -45,6 +44,9 @@ public class MsiBuilderTests
     {
         // RenderingManager's real postinstall is ~15 KB and that's what broke
         // the previous implementation. Go a bit bigger to add safety margin.
+        // Note: the script is transported through the VBS as UTF-8 with a BOM
+        // (not UTF-16LE), so 20 KB of PS source stays ~20 KB after UTF-8
+        // encoding and produces ~27 KB of base64 before chunking.
         var largeScript = BuildLargePowerShellScript(20_000);
 
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", largeScript);
@@ -94,13 +96,32 @@ public class MsiBuilderTests
     }
 
     [Fact]
-    public void BuildScriptActionVbs_EscapesActionNameInTempPath()
+    public void BuildScriptActionVbs_EmbedsActionNameInTempPath()
     {
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPreinstall", "exit 0");
         Assert.Contains("\\cimian-CimianPreinstall-", vbs);
 
         var vbs2 = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
         Assert.Contains("\\cimian-CimianPostinstall-", vbs2);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("bad name")]          // space
+    [InlineData("bad/name")]          // path separator
+    [InlineData("bad\\name")]         // path separator
+    [InlineData("bad\"name")]         // quote that would break VBS string literal
+    [InlineData("bad;name")]          // VBS statement separator
+    [InlineData("..\\escape")]        // directory traversal attempt
+    public void BuildScriptActionVbs_RejectsUnsafeActionNames(string badName)
+    {
+        // actionName is interpolated directly into VBS string literals and the
+        // staged temp file path. The method must refuse anything that could
+        // break either surface rather than silently producing a corrupted
+        // custom action or writing outside %TEMP%.
+        var ex = Assert.ThrowsAny<ArgumentException>(
+            () => MsiBuilder.BuildScriptActionVbs(badName, "exit 0"));
+        Assert.Equal("actionName", ex.ParamName);
     }
 
     private static void AssertAllLinesUnderLimit(string vbs)
