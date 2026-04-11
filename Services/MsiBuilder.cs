@@ -686,18 +686,38 @@ public class MsiBuilder
         // ~1022 char hard limit once wrapped in `b64 = b64 & "..."`.
         const int chunkSize = 800;
 
-        var psExe = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell", "v1.0", "powershell.exe");
-
         var vbs = new StringBuilder(base64.Length + 4096);
         vbs.Append("On Error Resume Next\r\n");
-        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc\r\n");
+        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
+        vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
         // surfaces the extraction dir - preinstall/postinstall scripts can read
         // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n");
+        //
+        // Resolve the PowerShell runtime at install time so the same cimipkg MSI
+        // works on endpoints with or without PowerShell 7 installed:
+        //   1. Default to powershell.exe 5.1 from %SystemRoot% (guaranteed to be
+        //      present on every supported Windows image, including Server Core).
+        //   2. Upgrade to pwsh.exe 7 if it is installed in the standard path
+        //      (`C:\Program Files\PowerShell\7\pwsh.exe`). We look in the stable
+        //      directory first, then fall through to `7-preview` as a courtesy
+        //      for dev machines; both are official PowerShell install layouts.
+        // Scripts should stay 5.1-safe so they run under either runtime, but
+        // anything added via `#Requires -Version 7` will now execute under pwsh
+        // instead of silently failing under 5.1 when pwsh is installed.
+        //
+        // Probing via `fso.FileExists` is cheap (no disk IO beyond a directory
+        // lookup) and keeps the resolver fully local to the custom action - no
+        // PATH dependency, no environment variable lookups, no registry reads.
+        vbs.Append("psExe = \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\r\n");
+        vbs.Append("If fso.FileExists(\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\") Then\r\n");
+        vbs.Append("  psExe = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"\r\n");
+        vbs.Append("ElseIf fso.FileExists(\"C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe\") Then\r\n");
+        vbs.Append("  psExe = \"C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe\"\r\n");
+        vbs.Append("End If\r\n");
+        vbs.Append($"Session.Log \"{actionName}: using \" & psExe\r\n");
         vbs.Append("b64 = \"\"\r\n");
         for (int i = 0; i < base64.Length; i += chunkSize)
         {
@@ -736,13 +756,15 @@ public class MsiBuilder
         // "ws.Run ran and powershell exited with code N".
         vbs.Append("  Err.Clear\r\n");
         vbs.Append("  rc = -1\r\n");
-        vbs.Append($"  rc = ws.Run(\"\"\"{psExe}\"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"\" & tmpFile & \"\"\"\", 0, True)\r\n");
+        // psExe is a VBS variable resolved above (pwsh.exe 7 if installed, else
+        // powershell.exe 5.1). Concatenate it into the command line so the
+        // custom action never hard-codes a runtime at MSI build time.
+        vbs.Append("  rc = ws.Run(\"\"\"\" & psExe & \"\"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"\" & tmpFile & \"\"\"\", 0, True)\r\n");
         vbs.Append("  If Err.Number <> 0 Then\r\n");
         vbs.Append($"    Session.Log \"{actionName}: failed to start powershell: \" & Err.Number & \" - \" & Err.Description\r\n");
         vbs.Append("  Else\r\n");
         vbs.Append($"    Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
         vbs.Append("  End If\r\n");
-        vbs.Append("  Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         vbs.Append("  If fso.FileExists(tmpFile) Then fso.DeleteFile tmpFile\r\n");
         vbs.Append("End If\r\n");
 

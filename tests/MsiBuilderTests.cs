@@ -124,6 +124,59 @@ public class MsiBuilderTests
         Assert.Equal("actionName", ex.ParamName);
     }
 
+    [Fact]
+    public void BuildScriptActionVbs_EmitsPwshRuntimeDetection()
+    {
+        // The custom action must resolve the PowerShell runtime at install time
+        // rather than baking a specific path into the MSI at build time. This
+        // lets the same cimipkg MSI work on endpoints whether or not
+        // PowerShell 7 is installed: pwsh.exe is preferred when present,
+        // otherwise it falls back to the 5.1 powershell.exe that ships with
+        // every supported Windows image.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        // Both the fallback and the upgrade paths must be in the generated VBS.
+        Assert.Contains(
+            "psExe = \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"",
+            vbs);
+        Assert.Contains(
+            "fso.FileExists(\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\")",
+            vbs);
+        Assert.Contains(
+            "psExe = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"",
+            vbs);
+        // 7-preview is probed as a courtesy for dev machines.
+        Assert.Contains("7-preview", vbs);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_WsRunUsesPsExeVariableNotHardcodedPath()
+    {
+        // Regression guard: previous revisions interpolated the powershell.exe
+        // path as a literal into the ws.Run command line, baking PS 5.1 into
+        // every MSI at build time. The resolver-based design must use the
+        // runtime-resolved psExe variable instead.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        // The ws.Run line must concatenate psExe, not embed a literal
+        // powershell.exe path directly inside the string literal.
+        Assert.Contains("ws.Run(\"\"\"\" & psExe & \"\"\"", vbs);
+
+        // And the only literal mentions of the 5.1 path should be the
+        // fallback assignment - not an argument to ws.Run.
+        var wsRunLines = vbs
+            .Replace("\r\n", "\n")
+            .Split('\n')
+            .Where(l => l.Contains("ws.Run("))
+            .ToList();
+        Assert.NotEmpty(wsRunLines);
+        foreach (var line in wsRunLines)
+        {
+            Assert.DoesNotContain("WindowsPowerShell\\v1.0\\powershell.exe", line);
+            Assert.DoesNotContain("PowerShell\\7\\pwsh.exe", line);
+        }
+    }
+
     private static void AssertAllLinesUnderLimit(string vbs)
     {
         var lines = vbs.Replace("\r\n", "\n").Split('\n');
