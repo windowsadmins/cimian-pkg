@@ -1,6 +1,6 @@
 # cimipkg - Cimian Package Builder
 
-A standalone tool for building `.msi`, `.pkg`, and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
+A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
 
 ## Overview
 
@@ -12,7 +12,6 @@ A standalone tool for building `.msi`, `.pkg`, and `.nupkg` packages for [Cimian
 |--------|------|-------------|
 | `.msi` | *(default)* | Native Windows Installer package via DTF. Embeds payload in CAB, scripts as custom actions, full build-info.yaml round-trip via `CIMIAN_PKG_BUILD_INFO` property. |
 | `.nupkg` | `--nupkg` | Chocolatey-compatible NuGet package. Add `--intunewin` to also generate `.intunewin`. |
-| `.pkg` | `--pkg` | ZIP-based package for sbin-installer. |
 
 ## Installation
 
@@ -36,9 +35,6 @@ cimipkg <project-directory>
 # Build with verbose output
 cimipkg --verbose <project-directory>
 
-# Build .pkg format instead
-cimipkg --pkg <project-directory>
-
 # Build .nupkg format
 cimipkg --nupkg <project-directory>
 
@@ -51,9 +47,6 @@ cimipkg --create <directory-name>
 # Sign with a specific certificate
 cimipkg --sign-cert "My Certificate Name" <project-directory>
 cimipkg --sign-thumbprint ABCDEF1234 <project-directory>
-
-# Re-sign an existing .pkg
-cimipkg --resign <path-to.pkg> --resign-cert "My Certificate Name"
 
 # Build without the post-build cimiimport prompt (CI/CD)
 cimipkg --skip-import <project-directory>
@@ -96,11 +89,11 @@ script runs during MSI removal (`msiexec /x`) or Chocolatey `choco uninstall`.
 
 ### How scripts map to each output format
 
-| cimipkg script | MSI | nupkg (Chocolatey / sbin-installer) | pkg |
-|---|---|---|---|
-| `preinstall*.ps1` | Custom action before payload copy | `chocolateyBeforeModify.ps1` | Copied as-is |
-| `postinstall*.ps1` | Custom action after payload copy | `chocolateyInstall.ps1` | Copied as-is |
-| `uninstall.ps1` | Custom action on `REMOVE="ALL"` | `chocolateyUninstall.ps1` | Copied as-is |
+| cimipkg script | MSI | nupkg (Chocolatey / sbin-installer) |
+|---|---|---|
+| `preinstall*.ps1` | Custom action before payload copy | `chocolateyBeforeModify.ps1` |
+| `postinstall*.ps1` | Custom action after payload copy | `chocolateyInstall.ps1` |
+| `uninstall.ps1` | Custom action on `REMOVE="ALL"` | `chocolateyUninstall.ps1` |
 
 **Chocolatey limitation:** `chocolateyBeforeModify.ps1` only runs when an
 existing package is being upgraded or uninstalled. On a fresh install,
