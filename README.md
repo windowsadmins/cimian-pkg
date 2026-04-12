@@ -1,4 +1,4 @@
-# cimipkg - Cimian Package Builder
+# Cimian Package Builder
 
 A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
 
@@ -12,6 +12,7 @@ A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https:/
 |--------|------|-------------|
 | `.msi` | *(default)* | Native Windows Installer package via DTF. Embeds payload in CAB, scripts as custom actions, full build-info.yaml round-trip via `CIMIAN_PKG_BUILD_INFO` property. |
 | `.nupkg` | `--nupkg` | Chocolatey-compatible NuGet package. Add `--intunewin` to also generate `.intunewin`. |
+
 
 ## Installation
 
@@ -50,6 +51,9 @@ cimipkg --sign-thumbprint ABCDEF1234 <project-directory>
 
 # Build without the post-build cimiimport prompt (CI/CD)
 cimipkg --skip-import <project-directory>
+
+# Use a specific .env file for placeholders and signing
+cimipkg --env /path/to/.env <project-directory>
 ```
 
 ### Post-build import prompt
@@ -192,10 +196,13 @@ When building `.msi`, cimipkg:
 
 1. Creates MSI tables (Property, Directory, Component, File, Media, Feature, etc.) via DTF
 2. Embeds payload files in a compressed CAB archive
-3. Converts PowerShell scripts to silent VBScript custom actions
-4. Stores the full `build-info.yaml` in the `CIMIAN_PKG_BUILD_INFO` MSI property for metadata round-trip
-5. Generates a deterministic `UpgradeCode` from the product identifier (stable across versions)
-6. Signs the MSI if a signing certificate is configured
+3. Converts PowerShell scripts to VBScript custom actions (base64-encoded, chunked to stay under VBS parser limits — supports scripts of any practical size)
+4. **Authenticode-signs embedded scripts** if `signing_certificate` or `signing_thumbprint` is configured. The signature is applied at build time so the temp `.ps1` written at install time already carries a valid signature — prevents EDR/AV false positives from unsigned script execution
+5. Stores the full `build-info.yaml` in the `CIMIAN_PKG_BUILD_INFO` MSI property for metadata round-trip
+6. Generates a deterministic `UpgradeCode` from the product identifier (stable across versions)
+7. Signs the MSI if a signing certificate is configured
+
+At install time, custom actions **auto-detect PowerShell 7** (`pwsh.exe`) if installed, falling back to PowerShell 5.1. Scripts should stay 5.1-compatible but anything using `#Requires -Version 7` will execute under pwsh when available.
 
 The resulting MSI is a standard Windows Installer package that can be installed by `sbin-installer`, `msiexec`, or any MDM system.
 
