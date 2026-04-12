@@ -94,6 +94,22 @@ Scripts are numbered if you need ordering (`preinstall01.ps1`, `preinstall02.ps1
 and are combined into a single custom action per phase at build time. The `uninstall.ps1`
 script runs during MSI removal (`msiexec /x`) or Chocolatey `choco uninstall`.
 
+### How scripts map to each output format
+
+| cimipkg script | MSI | nupkg (Chocolatey / sbin-installer) | pkg |
+|---|---|---|---|
+| `preinstall*.ps1` | Custom action before payload copy | `chocolateyBeforeModify.ps1` | Copied as-is |
+| `postinstall*.ps1` | Custom action after payload copy | `chocolateyInstall.ps1` | Copied as-is |
+| `uninstall.ps1` | Custom action on `REMOVE="ALL"` | `chocolateyUninstall.ps1` | Copied as-is |
+
+**Chocolatey limitation:** `chocolateyBeforeModify.ps1` only runs when an
+existing package is being upgraded or uninstalled. On a fresh install,
+Chocolatey does not execute it — this is a `choco` engine limitation, not a
+cimipkg design choice. Packages consumed by
+[sbin-installer](https://github.com/windowsadmins/sbin-installer) do not have
+this limitation — sbin-installer executes `chocolateyBeforeModify.ps1`
+unconditionally before every install.
+
 ## build-info.yaml
 
 ```yaml

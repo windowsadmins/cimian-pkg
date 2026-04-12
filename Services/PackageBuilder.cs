@@ -432,7 +432,11 @@ install_location: C:\
                 _logger.LogDebug("Copied payload to tools directory");
             }
 
-            // Generate chocolateyInstall.ps1
+            // Generate chocolateyBeforeModify.ps1 (preinstall scripts)
+            _chocolateyGenerator.CreateChocolateyBeforeModifyScript(
+                projectDir, toolsDir, envVars);
+
+            // Generate chocolateyInstall.ps1 (payload + postinstall scripts)
             _chocolateyGenerator.CreateChocolateyInstallScript(
                 buildInfo, projectDir, toolsDir, isInstallerPackage, hasPayloadFiles, envVars);
 
