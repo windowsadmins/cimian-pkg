@@ -58,6 +58,7 @@ class Program
         projectDirArg.SetDefaultValue(".");
 
         // Build options
+        // TODO(pkg-sunset): Remove --pkg option and pkgOption variable
         var pkgOption = new Option<bool>(
             aliases: ["--pkg"],
             description: "Build .pkg format (default is .msi)");
@@ -91,7 +92,7 @@ class Program
             aliases: ["--create", "-c"],
             description: "Create a new project structure at the specified path");
 
-        // Resign command
+        // TODO(pkg-sunset): Remove --resign, --resign-cert, --resign-thumbprint (pkg-only feature)
         var resignOption = new Option<string?>(
             aliases: ["--resign"],
             description: "Re-sign an existing .pkg package without recompressing");
@@ -167,7 +168,7 @@ class Program
                     return;
                 }
 
-                // Handle --resign
+                // TODO(pkg-sunset): Remove --resign handler block (pkg-only feature)
                 if (!string.IsNullOrEmpty(resignPath))
                 {
                     logger.LogInformation("Re-signing package: {Path}", resignPath);
