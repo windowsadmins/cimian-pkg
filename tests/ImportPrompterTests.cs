@@ -100,10 +100,26 @@ public class ImportPrompterTests
     }
 
     [Fact]
-    public async Task PromptYesNoAsync_UnrecognizedInput_ReturnsDefault()
+    public async Task PromptYesNoAsync_UnrecognizedInput_ReturnsFalse()
     {
+        // Any non-empty response that isn't a yes-marker is treated as "no",
+        // regardless of defaultYes. Matches MunkiPkg's Swift behavior at
+        // munkipkg.swift:982: `return r == "y" || r == "yes"`.
         var result = await WithRedirectedStdin("maybe\n", () =>
             ImportPrompter.PromptYesNoAsync("test?", defaultYes: false, TimeSpan.FromSeconds(5)));
+
+        Assert.False(result);
+    }
+
+    [Fact]
+    public async Task PromptYesNoAsync_UnrecognizedInput_IgnoresDefaultYes()
+    {
+        // Explicit coverage for the "defaultYes is ignored for non-empty
+        // non-yes input" semantics. If the user types anything other than
+        // y/yes (even "true", "1", "ok"), we treat it as no — we don't fall
+        // back to defaultYes. Only an empty response (Enter) uses defaultYes.
+        var result = await WithRedirectedStdin("maybe\n", () =>
+            ImportPrompter.PromptYesNoAsync("test?", defaultYes: true, TimeSpan.FromSeconds(5)));
 
         Assert.False(result);
     }
