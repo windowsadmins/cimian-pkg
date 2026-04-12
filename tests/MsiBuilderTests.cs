@@ -66,7 +66,7 @@ public class MsiBuilderTests
     [Fact]
     public void BuildScriptActionVbs_ExtremelyLargeScript_StillValid()
     {
-        // 60 KB PowerShell source -> ~120 KB UTF-16 -> ~160 KB base64.
+        // 60 KB PowerShell source -> ~60 KB UTF-8 (with BOM) -> ~80 KB base64.
         // Still has to chunk down to <1000 char lines.
         var huge = BuildLargePowerShellScript(60_000);
 
@@ -79,14 +79,14 @@ public class MsiBuilderTests
     public void BuildScriptActionVbs_RoundTrip_PreservesScriptContentExactly()
     {
         // Pick a script with characters that would otherwise need escaping in VBS
-        // string literals (quotes, backslashes, UTF-16 surrogates, newlines).
+        // string literals (quotes, backslashes, Unicode via UTF-8, newlines).
         var original =
             "# Cimian postinstall\r\n" +
             "$path = 'C:\\Program Files\\Foo\\bar.exe'\r\n" +
             "Write-Host \"Installing to $path\"\r\n" +
             "if (Test-Path $path) { Write-Host 'already there' }\r\n" +
             "Get-ScheduledTask | Where-Object { $_.Name -eq 'X' }\r\n" +
-            // Some unicode to make sure UTF-16 survives intact.
+            // Some unicode to make sure UTF-8 round-trips correctly.
             "# emoji: \u2713 check mark\r\n";
 
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", original);
@@ -122,6 +122,57 @@ public class MsiBuilderTests
         var ex = Assert.ThrowsAny<ArgumentException>(
             () => MsiBuilder.BuildScriptActionVbs(badName, "exit 0"));
         Assert.Equal("actionName", ex.ParamName);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_EmitsPwshRuntimeDetection()
+    {
+        // The custom action must resolve the PowerShell runtime at install time
+        // rather than baking a specific path into the MSI at build time. This
+        // lets the same cimipkg MSI work on endpoints whether or not
+        // PowerShell 7 is installed: pwsh.exe is preferred when present,
+        // otherwise it falls back to the 5.1 powershell.exe that ships with
+        // every supported Windows image.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        // Paths must be resolved via env expansion at install time, not hardcoded
+        // to C:\ — ensures the MSI works regardless of OS drive letter.
+        Assert.Contains("ws.ExpandEnvironmentStrings(\"%SystemRoot%\")", vbs);
+        Assert.Contains("ws.ExpandEnvironmentStrings(\"%ProgramW6432%\")", vbs);
+        // Fallback to 5.1 via %SystemRoot%
+        Assert.Contains("sysRoot & \"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"", vbs);
+        // Upgrade to pwsh 7 via %ProgramW6432%
+        Assert.Contains("progFiles & \"\\PowerShell\\7\\pwsh.exe\"", vbs);
+        // 7-preview is probed as a courtesy for dev machines.
+        Assert.Contains("7-preview", vbs);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_WsRunUsesPsExeVariableNotHardcodedPath()
+    {
+        // Regression guard: previous revisions interpolated the powershell.exe
+        // path as a literal into the ws.Run command line, baking PS 5.1 into
+        // every MSI at build time. The resolver-based design must use the
+        // runtime-resolved psExe variable instead.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        // The ws.Run line must concatenate psExe, not embed a literal
+        // powershell.exe path directly inside the string literal.
+        Assert.Contains("ws.Run(\"\"\"\" & psExe & \"\"\"", vbs);
+
+        // And the only literal mentions of the 5.1 path should be the
+        // fallback assignment - not an argument to ws.Run.
+        var wsRunLines = vbs
+            .Replace("\r\n", "\n")
+            .Split('\n')
+            .Where(l => l.Contains("ws.Run("))
+            .ToList();
+        Assert.NotEmpty(wsRunLines);
+        foreach (var line in wsRunLines)
+        {
+            Assert.DoesNotContain("WindowsPowerShell\\v1.0\\powershell.exe", line);
+            Assert.DoesNotContain("PowerShell\\7\\pwsh.exe", line);
+        }
     }
 
     private static void AssertAllLinesUnderLimit(string vbs)
