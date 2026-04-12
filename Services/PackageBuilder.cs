@@ -126,6 +126,7 @@ public class PackageBuilder
 
         // Build the appropriate package format (default: MSI)
         string packagePath;
+        // TODO(pkg-sunset): Remove BuildPkg branch and BuildPkgPackage method
         if (options.BuildPkg)
         {
             _logger.LogInformation("Building .pkg format (sbin-installer compatible)");
@@ -162,6 +163,7 @@ public class PackageBuilder
         return packagePath;
     }
 
+    // TODO(pkg-sunset): Remove ResignPackage method entirely (pkg-only feature)
     /// <summary>
     /// Re-signs an existing .pkg package without recompressing.
     /// </summary>
@@ -305,6 +307,7 @@ install_location: C:\
         _logger.LogInformation("Project created successfully");
     }
 
+    // TODO(pkg-sunset): Remove BuildPkgPackage method entirely
     /// <summary>
     /// Builds a .pkg package (ZIP archive with sbin-installer structure).
     /// </summary>
@@ -432,7 +435,11 @@ install_location: C:\
                 _logger.LogDebug("Copied payload to tools directory");
             }
 
-            // Generate chocolateyInstall.ps1
+            // Generate chocolateyBeforeModify.ps1 (preinstall scripts)
+            _chocolateyGenerator.CreateChocolateyBeforeModifyScript(
+                projectDir, toolsDir, envVars);
+
+            // Generate chocolateyInstall.ps1 (payload + postinstall scripts)
             _chocolateyGenerator.CreateChocolateyInstallScript(
                 buildInfo, projectDir, toolsDir, isInstallerPackage, hasPayloadFiles, envVars);
 
@@ -795,6 +802,7 @@ exit $LASTEXITCODE
 /// </summary>
 public record PackageBuildOptions
 {
+    // TODO(pkg-sunset): Remove BuildPkg property
     /// <summary>
     /// Build .pkg format (sbin-installer compatible). Default is .msi.
     /// </summary>

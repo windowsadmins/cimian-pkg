@@ -9,6 +9,7 @@ using Microsoft.Extensions.Logging;
 
 namespace Cimian.CLI.Cimipkg.Services;
 
+// TODO(pkg-sunset): Remove entire ZipArchiveHelper class (pkg-only)
 /// <summary>
 /// Utilities for creating and manipulating ZIP archives for .pkg packages.
 /// Supports ZIP64 for files larger than 2GB.
