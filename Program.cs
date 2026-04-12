@@ -69,7 +69,7 @@ class Program
 
         var intunewinOption = new Option<bool>(
             aliases: ["--intunewin"],
-            description: "Also generate .intunewin from .nupkg (only works with --nupkg)");
+            description: "Also generate .intunewin for Intune deployment (works with .msi and .nupkg)");
 
         var envOption = new Option<string?>(
             aliases: ["--env", "-e"],
