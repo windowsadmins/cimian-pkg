@@ -82,6 +82,10 @@ class Program
             aliases: ["--sign-cert"],
             description: "Certificate subject name for signing (overrides build-info.yaml)");
 
+        var skipImportOption = new Option<bool>(
+            aliases: ["--skip-import"],
+            description: "Skip the post-build prompt that offers to run cimiimport on the built package. Useful for CI/CD pipelines.");
+
         // Create command
         var createOption = new Option<string?>(
             aliases: ["--create", "-c"],
@@ -105,6 +109,7 @@ class Program
         rootCommand.AddOption(nupkgOption);
         rootCommand.AddOption(signThumbprintOption);
         rootCommand.AddOption(signCertOption);
+        rootCommand.AddOption(skipImportOption);
         rootCommand.AddOption(intunewinOption);
         rootCommand.AddOption(envOption);
         rootCommand.AddOption(createOption);
@@ -126,6 +131,7 @@ class Program
             var resignThumbprint = context.ParseResult.GetValueForOption(resignThumbprintOption);
             var signThumbprint = context.ParseResult.GetValueForOption(signThumbprintOption);
             var signCert = context.ParseResult.GetValueForOption(signCertOption);
+            var skipImport = context.ParseResult.GetValueForOption(skipImportOption);
 
             // Set up logging with clean output (like Go binaries)
             var logLevel = verbose ? LogLevel.Debug : LogLevel.Information;
@@ -194,11 +200,20 @@ class Program
                     EnvFilePath = envFile,
                     Verbose = verbose,
                     SigningThumbprint = signThumbprint,
-                    SigningCertificate = signCert
+                    SigningCertificate = signCert,
+                    SkipImport = skipImport
                 };
 
                 var packagePath = packageBuilder.Build(projectDir, options);
                 WriteSuccess($"Package created: {packagePath}");
+
+                // Offer to run cimiimport on the built package. Honors
+                // --skip-import, non-TTY fast path, and a 60s timeout.
+                // Sync-over-async is fine here: this is a CLI one-shot and
+                // there's no synchronization context to deadlock on.
+                ImportPrompter.MaybeRunImportAsync(packagePath, skipImport, logger)
+                    .GetAwaiter().GetResult();
+
                 context.ExitCode = 0;
             }
             catch (Exception ex)
