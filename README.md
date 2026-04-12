@@ -2,7 +2,7 @@
 
 A standalone Windows package builder. Define your package in a `build-info.yaml`, add payload files and PowerShell scripts, and `cimipkg` produces signed, versioned `.msi` or `.nupkg` packages — no WiX Toolset required.
 
-Also included as a submodule in [Cimian](https://github.com/windowsadmins/cimian) for enterprise software deployment.
+Prebundled in [Cimian](https://github.com/windowsadmins/cimian) for enterprise software deployment.
 
 ## Installation
 
@@ -96,7 +96,7 @@ SIGNING_CERT_SUBJECT=YourOrganization Enterprise Certificate
 
 CLI flags (`--sign-thumbprint`, `--sign-cert`) override anything resolved from YAML or env. The same `.env` file also injects variables into install/uninstall scripts at build time.
 
-## MSI (default)
+## MSI
 
 ```bash
 cimipkg <project-directory>
