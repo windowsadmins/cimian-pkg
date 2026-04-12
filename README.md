@@ -167,12 +167,7 @@ For MSI, the `.msi` is used directly as the setup file. For nupkg, a Chocolatey 
 
 ## CI/CD
 
-```bash
-# Skip the post-build cimiimport prompt
-cimipkg --skip-import <project-directory>
-```
-
-The post-build prompt is automatically suppressed when stdin is non-interactive (CI runners, piped input) or after a 60-second timeout.
+The post-build `cimiimport` prompt is automatically skipped when stdin is non-interactive (CI runners, piped input, IDE run-configs). Use `--skip-import` to suppress it explicitly in other contexts.
 
 ## License
 
