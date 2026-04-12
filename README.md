@@ -1,6 +1,6 @@
 # cimipkg - Cimian Package Builder
 
-A standalone tool for building `.msi`, `.pkg`, and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
+A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
 
 ## Overview
 
@@ -12,7 +12,6 @@ A standalone tool for building `.msi`, `.pkg`, and `.nupkg` packages for [Cimian
 |--------|------|-------------|
 | `.msi` | *(default)* | Native Windows Installer package via DTF. Embeds payload in CAB, scripts as custom actions, full build-info.yaml round-trip via `CIMIAN_PKG_BUILD_INFO` property. |
 | `.nupkg` | `--nupkg` | Chocolatey-compatible NuGet package. Add `--intunewin` to also generate `.intunewin`. |
-| `.pkg` | `--pkg` | ZIP-based package for sbin-installer. |
 
 ## Installation
 
@@ -36,9 +35,6 @@ cimipkg <project-directory>
 # Build with verbose output
 cimipkg --verbose <project-directory>
 
-# Build .pkg format instead
-cimipkg --pkg <project-directory>
-
 # Build .nupkg format
 cimipkg --nupkg <project-directory>
 
@@ -51,9 +47,6 @@ cimipkg --create <directory-name>
 # Sign with a specific certificate
 cimipkg --sign-cert "My Certificate Name" <project-directory>
 cimipkg --sign-thumbprint ABCDEF1234 <project-directory>
-
-# Re-sign an existing .pkg
-cimipkg --resign <path-to.pkg> --resign-cert "My Certificate Name"
 
 # Build without the post-build cimiimport prompt (CI/CD)
 cimipkg --skip-import <project-directory>
@@ -93,6 +86,22 @@ my-package/
 Scripts are numbered if you need ordering (`preinstall01.ps1`, `preinstall02.ps1`, etc.)
 and are combined into a single custom action per phase at build time. The `uninstall.ps1`
 script runs during MSI removal (`msiexec /x`) or Chocolatey `choco uninstall`.
+
+### How scripts map to each output format
+
+| cimipkg script | MSI | nupkg (Chocolatey / sbin-installer) |
+|---|---|---|
+| `preinstall*.ps1` | Custom action before payload copy | `chocolateyBeforeModify.ps1` |
+| `postinstall*.ps1` | Custom action after payload copy | `chocolateyInstall.ps1` |
+| `uninstall.ps1` | Custom action on `REMOVE="ALL"` | `chocolateyUninstall.ps1` |
+
+**Chocolatey limitation:** `chocolateyBeforeModify.ps1` only runs when an
+existing package is being upgraded or uninstalled. On a fresh install,
+Chocolatey does not execute it — this is a `choco` engine limitation, not a
+cimipkg design choice. Packages consumed by
+[sbin-installer](https://github.com/windowsadmins/sbin-installer) do not have
+this limitation — sbin-installer executes `chocolateyBeforeModify.ps1`
+unconditionally before every install.
 
 ## build-info.yaml
 
