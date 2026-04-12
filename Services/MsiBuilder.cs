@@ -118,7 +118,7 @@ public class MsiBuilder
             if (payloadFiles.Length > 0)
             {
                 _logger.LogDebug("Writing payload tables ({Count} files)...", payloadFiles.Length);
-                WritePayloadTables(db, payloadDir, payloadFiles, identifier);
+                WritePayloadTables(db, payloadDir, payloadFiles, identifier, msiVersion);
             }
             else
             {
@@ -254,6 +254,17 @@ public class MsiBuilder
         SetProperty("REBOOT", "ReallySuppress");
         SetProperty("MSIRESTARTMANAGERCONTROL", "Disable");
 
+        // Force aggressive reinstall on any repair/reinstall operation:
+        //   a - reinstall all files regardless of version/checksum/date
+        //   m - rewrite all required HKLM registry entries
+        //   u - rewrite all required HKCU registry entries
+        //   s - reinstall all shortcuts and re-cache icons
+        // Fresh installs use the synthetic File.Version set in WritePayloadTables
+        // (see the "Extract PE FileVersion..." block) to force rule-1 overwrites,
+        // so between the two, cimipkg MSIs always replace on-disk payload files.
+        // The MSI is the source of truth.
+        SetProperty("REINSTALLMODE", "amus");
+
         // ARP (Add/Remove Programs) properties
         if (!string.IsNullOrEmpty(buildInfo.Product.Description))
             SetProperty("ARPCOMMENTS", buildInfo.Product.Description);
@@ -345,7 +356,8 @@ public class MsiBuilder
         Database db,
         string payloadDir,
         string[] payloadFiles,
-        string identifier)
+        string identifier,
+        string msiVersion)
     {
         // Single media entry with embedded CAB (#product.cab = embedded stream)
         db.Execute($"INSERT INTO `Media` (`DiskId`, `LastSequence`, `DiskPrompt`, `Cabinet`, `VolumeLabel`, `Source`) VALUES (1, {payloadFiles.Length}, '', '#product.cab', '', '')");
@@ -404,12 +416,19 @@ public class MsiBuilder
             db.Execute($"INSERT INTO `Component` (`Component`, `ComponentId`, `Directory_`, `Attributes`, `Condition`, `KeyPath`) VALUES ('{EscSql(componentKey)}', '{cid}', '{EscSql(directoryRef)}', 256, '', '{EscSql(fileKey)}')");
 
             // Extract PE FileVersion so Windows Installer's file versioning rules work.
-            // Without this, the File table Version column is empty and MSI treats the payload
-            // as "unversioned", which means it will refuse to overwrite a versioned file
-            // already on disk — the install "succeeds" but silently skips the file copy.
-            // Truly unversioned files (scripts, txt, etc.) return zero parts from
-            // FileVersionInfo rather than throwing, so they take the "stays empty" branch
-            // naturally; the catch is only for genuine I/O or access problems.
+            // For unversioned files (.ps1, .json, .txt, etc.) we fall back to the package
+            // version so MSI still treats them as "versioned" and applies rule 1 of the
+            // file install rules (newer version wins). Without a File.Version, MSI uses
+            // the "unversioned vs user-modified" rule which refuses to overwrite files
+            // it considers to have been edited on disk - exactly the behavior that caused
+            // v2026.04.10.1431 RenderingManager to silently ship stale scripts to 142
+            // endpoints because leftover .ps1 files from the pre-MSI packages blocked
+            // the MSI from writing the new content.
+            //
+            // The synthetic version is safe even for files that are genuinely unversioned
+            // on disk: MSI only uses File.Version for comparison, it does not try to read
+            // a version resource from non-PE files. So the only observable effect is that
+            // the cimipkg MSI becomes an authoritative source of truth for its payload.
             var fileVersion = "";
             try
             {
@@ -432,11 +451,25 @@ public class MsiBuilder
                 ex is NotSupportedException)
             {
                 // Narrow set of expected I/O / access issues when reading PE metadata.
-                // Log + fall back to empty so MSI uses timestamp comparison — operators
-                // get a breadcrumb instead of a silent drop back to "unversioned".
+                // Log + fall through to the synthetic-version fallback below so operators
+                // get a breadcrumb but the MSI still guarantees overwrite semantics.
                 _logger.LogWarning(
-                    "Failed to read PE file version for '{FilePath}': {Error}. MSI File.Version will be empty for this entry.",
+                    "Failed to read PE file version for '{FilePath}': {Error}. Falling back to package version for MSI File.Version.",
                     filePath, ex.Message);
+            }
+
+            if (string.IsNullOrEmpty(fileVersion))
+            {
+                // Fallback: stamp unversioned files with the package version so MSI
+                // treats every cimipkg build as newer than whatever is on disk. This
+                // is what makes cimipkg MSIs the source of truth for their payloads.
+                //
+                // MsiVersionConverter returns a 3-part MSI version (major.minor.build),
+                // but the MSI File.Version column is validated against the 4-part
+                // major.minor.build.revision shape. A 3-part value silently falls back
+                // to "unversioned" and the rule we are trying to avoid reasserts
+                // itself, so pad to 4 parts before writing.
+                fileVersion = NormalizeToFourPartVersion(msiVersion);
             }
 
             // File
@@ -578,28 +611,142 @@ public class MsiBuilder
     }
 
     /// <summary>
-    /// Write an immediate custom action (Type 98 = EXE from directory, continue on error).
-    /// Used for preinstall which runs during the immediate phase.
+    /// Write a Type 102 inline VBScript custom action that runs a PowerShell script
+    /// of arbitrary size. The VBS ships the PS1 content as a chunked base64 string,
+    /// decodes it at install time via MSXML + ADODB.Stream, writes it to a temp
+    /// .ps1 file, and invokes <c>powershell.exe -File</c> on it.
+    ///
+    /// Why not the obvious <c>-EncodedCommand</c> approach:
+    /// the previous implementation inlined the base64 into a single <c>ws.Run</c>
+    /// line. For any non-trivial postinstall script (~15 KB of PS1 is common) that
+    /// line grew past three hard limits simultaneously:
+    ///   * VBScript parser chokes at ~1022 chars per source line
+    ///   * <c>CreateProcess</c> command line limit is 32,767 chars
+    ///   * Legacy cmd.exe limit is 8,191 chars
+    /// which produced <c>Info 1720. ... script error -2147024690, Line 5, Column 1</c>
+    /// at install time and caused the whole custom action to silently no-op.
+    /// RenderingManager v2026.04.10.1431 hit exactly this, which is why DiagnoseSystem
+    /// and MonitorAlerts scheduled tasks never got registered on 142 endpoints.
+    ///
+    /// The temp-file approach side-steps all three limits: the base64 lives in a
+    /// normal VBS variable built from many short <c>&amp;</c> concatenations, then
+    /// only the short temp-file path is passed to <c>powershell.exe</c>.
     /// </summary>
     private static void WriteImmediateScriptAction(Database db, string actionName, string scriptContent)
     {
-        var bytes = Encoding.Unicode.GetBytes(scriptContent);
-        var encodedCommand = Convert.ToBase64String(bytes);
-        var psExe = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
+        var vbsStr = BuildScriptActionVbs(actionName, scriptContent);
+        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 102, '', '{EscSql(vbsStr)}', 0)");
+    }
+
+    /// <summary>
+    /// Build the VBScript body for a Cimian script custom action. Public so the test
+    /// project can assert on the generated VBS without having to create an MSI database.
+    /// </summary>
+    public static string BuildScriptActionVbs(string actionName, string scriptContent)
+    {
+        // actionName is interpolated directly into both VBS string literals and the
+        // staged temp-file path, so reject anything that could break either surface.
+        // cimipkg only ever passes the fixed values CimianPreinstall /
+        // CimianPostinstall / CimianUninstall, but the method is public for tests
+        // and we want a loud failure rather than a corrupted MSI if a caller
+        // accidentally passes user-controlled data.
+        if (string.IsNullOrEmpty(actionName))
+        {
+            throw new ArgumentException("actionName must not be null or empty", nameof(actionName));
+        }
+        foreach (var c in actionName)
+        {
+            if (!char.IsLetterOrDigit(c) && c != '_' && c != '-')
+            {
+                throw new ArgumentException(
+                    $"actionName must only contain letters, digits, '_' or '-'; got '{actionName}'",
+                    nameof(actionName));
+            }
+        }
+
+        // Encode as UTF-8 **with BOM** so PowerShell 5.1 reads the file reliably
+        // when invoked via `powershell.exe -File`. Without a BOM, PS 5.1 falls back
+        // to the system ANSI code page and mis-parses Unicode content — and because
+        // we write the bytes via ADODB.Stream in binary mode, there is no automatic
+        // BOM emission. The 3-byte 0xEF 0xBB 0xBF preamble is prepended explicitly
+        // so every staged script opens as UTF-8 regardless of the host locale.
+        //
+        // UTF-8 also nearly halves the base64 transport size compared to UTF-16LE
+        // for ASCII-dominant PowerShell source, which keeps the MSI
+        // CustomAction.Target column well under its LONGCHAR budget for even very
+        // large postinstall scripts.
+        var bom = Encoding.UTF8.GetPreamble(); // 0xEF 0xBB 0xBF
+        var body = Encoding.UTF8.GetBytes(scriptContent);
+        var bytes = new byte[bom.Length + body.Length];
+        Buffer.BlockCopy(bom, 0, bytes, 0, bom.Length);
+        Buffer.BlockCopy(body, 0, bytes, bom.Length, body.Length);
+        var base64 = Convert.ToBase64String(bytes);
+
+        // 800-char chunks keep each VBS source line comfortably under the parser's
+        // ~1022 char hard limit once wrapped in `b64 = b64 & "..."`.
+        const int chunkSize = 800;
+
+        var psExe = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
             "WindowsPowerShell", "v1.0", "powershell.exe");
 
-        // VBScript CA (Type 102 = 6+32+64, inline VBS, synchronous, continue on error):
-        //   1. Reads INSTALLDIR from Session.Property (available to immediate CAs)
-        //   2. Sets CIMIAN_INSTALLDIR env var so PowerShell $payloadRoot resolves at runtime
-        //   3. Launches PowerShell completely hidden via WScript.Shell.Run(cmd, 0, True)
-        var vbs = "Dim ws, env\r\n" +
-                  "Set ws = CreateObject(\"WScript.Shell\")\r\n" +
-                  "Set env = ws.Environment(\"Process\")\r\n" +
-                  "env(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n" +
-                  $"ws.Run \"{psExe} -WindowStyle Hidden -NoProfile -NonInteractive -ExecutionPolicy Bypass " +
-                  $"-EncodedCommand {encodedCommand}\", 0, True";
+        var vbs = new StringBuilder(base64.Length + 4096);
+        vbs.Append("On Error Resume Next\r\n");
+        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc\r\n");
+        vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
+        // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
+        // surfaces the extraction dir - preinstall/postinstall scripts can read
+        // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n");
+        vbs.Append("b64 = \"\"\r\n");
+        for (int i = 0; i < base64.Length; i += chunkSize)
+        {
+            var len = Math.Min(chunkSize, base64.Length - i);
+            vbs.Append("b64 = b64 & \"");
+            vbs.Append(base64, i, len);
+            vbs.Append("\"\r\n");
+        }
+        // MSXML base64 decode -> binary stream -> temp file.
+        // Msxml2.DOMDocument.6.0 and ADODB.Stream are both part of the Windows
+        // base image since XP, so they are available inside the msiexec sandbox.
+        vbs.Append("Set xml = CreateObject(\"Msxml2.DOMDocument.6.0\")\r\n");
+        vbs.Append("Set node = xml.CreateElement(\"b\")\r\n");
+        vbs.Append("node.DataType = \"bin.base64\"\r\n");
+        vbs.Append("node.Text = b64\r\n");
+        vbs.Append("Set stream = CreateObject(\"ADODB.Stream\")\r\n");
+        vbs.Append("stream.Type = 1\r\n"); // adTypeBinary
+        vbs.Append("stream.Open\r\n");
+        vbs.Append("stream.Write node.NodeTypedValue\r\n");
+        // Millisecond-unique temp path under SYSTEM's %TEMP% (C:\Windows\Temp when elevated).
+        // Using Timer() avoids needing a GUID generator in VBS.
+        vbs.Append($"tmpFile = ws.ExpandEnvironmentStrings(\"%TEMP%\") & \"\\cimian-{actionName}-\" & CLng(Timer * 1000) & \".ps1\"\r\n");
+        vbs.Append("stream.SaveToFile tmpFile, 2\r\n"); // adSaveCreateOverWrite
+        vbs.Append("stream.Close\r\n");
+        vbs.Append("If Err.Number <> 0 Then\r\n");
+        vbs.Append($"  Session.Log \"{actionName}: failed to stage temp script: \" & Err.Description\r\n");
+        vbs.Append("Else\r\n");
+        vbs.Append($"  Session.Log \"{actionName}: running \" & tmpFile\r\n");
+        // ws.Run "powershell.exe" -NoProfile ... -File "<tmpFile>", 0, True
+        // VBS quoting: "" produces a literal " inside a string literal, so """X""" = "X"
+        //
+        // Under `On Error Resume Next` a ws.Run() failure to even START the process
+        // (bad exe path, quoting bug, access denied) does not surface via `rc`;
+        // instead `Err.Number` gets set and `rc` is whatever was there before.
+        // Clear Err + seed rc with a sentinel so we can tell "ws.Run never ran" from
+        // "ws.Run ran and powershell exited with code N".
+        vbs.Append("  Err.Clear\r\n");
+        vbs.Append("  rc = -1\r\n");
+        vbs.Append($"  rc = ws.Run(\"\"\"{psExe}\"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"\" & tmpFile & \"\"\"\", 0, True)\r\n");
+        vbs.Append("  If Err.Number <> 0 Then\r\n");
+        vbs.Append($"    Session.Log \"{actionName}: failed to start powershell: \" & Err.Number & \" - \" & Err.Description\r\n");
+        vbs.Append("  Else\r\n");
+        vbs.Append($"    Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
+        vbs.Append("  End If\r\n");
+        vbs.Append("  Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
+        vbs.Append("  If fso.FileExists(tmpFile) Then fso.DeleteFile tmpFile\r\n");
+        vbs.Append("End If\r\n");
 
-        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 102, '', '{EscSql(vbs)}', 0)");
+        return vbs.ToString();
     }
 
 
@@ -745,6 +892,25 @@ public class MsiBuilder
     }
 
     private static string EscSql(string value) => value.Replace("'", "''");
+
+    /// <summary>
+    /// Pad an MSI product version to the 4-part major.minor.build.revision shape
+    /// required by the File table Version column. Inputs are trusted MSI versions
+    /// produced by <see cref="MsiVersionConverter.Convert"/>, so we only handle
+    /// the 2-part and 3-part shapes cimipkg actually emits today.
+    /// </summary>
+    private static string NormalizeToFourPartVersion(string version)
+    {
+        if (string.IsNullOrWhiteSpace(version)) return "0.0.0.0";
+        var parts = version.Split('.');
+        return parts.Length switch
+        {
+            1 => $"{parts[0]}.0.0.0",
+            2 => $"{parts[0]}.{parts[1]}.0.0",
+            3 => $"{parts[0]}.{parts[1]}.{parts[2]}.0",
+            _ => $"{parts[0]}.{parts[1]}.{parts[2]}.{parts[3]}",
+        };
+    }
 
     private static string SanitizeIdentifier(string input)
     {
