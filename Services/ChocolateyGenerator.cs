@@ -111,6 +111,7 @@ $payloadRoot = $payloadDir  # Alias for compatibility
     /// <c>chocolateyBeforeModify.ps1</c> unconditionally before every install.</para>
     /// </summary>
     public void CreateChocolateyBeforeModifyScript(
+        BuildInfo buildInfo,
         string projectDir,
         string toolsDir,
         IDictionary<string, string> envVars)
@@ -139,6 +140,12 @@ $toolsDir = ""$(Split-Path -Parent $MyInvocation.MyCommand.Definition)""
 $payloadDir = Join-Path $toolsDir ""payload""
 $payloadRoot = $payloadDir  # Alias for compatibility
 ");
+
+        if (!string.IsNullOrEmpty(buildInfo.InstallLocation))
+        {
+            sb.AppendLine($@"$installLocation = ""{EscapePowerShellString(buildInfo.InstallLocation)}""
+");
+        }
 
         foreach (var preinstallScript in preinstallScripts)
         {

@@ -437,7 +437,7 @@ install_location: C:\
 
             // Generate chocolateyBeforeModify.ps1 (preinstall scripts)
             _chocolateyGenerator.CreateChocolateyBeforeModifyScript(
-                projectDir, toolsDir, envVars);
+                buildInfo, projectDir, toolsDir, envVars);
 
             // Generate chocolateyInstall.ps1 (payload + postinstall scripts)
             _chocolateyGenerator.CreateChocolateyInstallScript(
