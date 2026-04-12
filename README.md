@@ -1,10 +1,10 @@
-# Cimian Package Builder
+# cimipkg
 
-A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https://github.com/windowsadmins/cimian) software deployment.
+A standalone `.msi` and `.nupkg` package builder. Define your package in a `build-info.yaml`, drop payload files and PowerShell scripts into a simple directory layout, and `cimipkg` produces signed, versioned Windows Installer or Chocolatey packages — no WiX Toolset or msiexec required.
 
 ## Overview
 
-`cimipkg` reads a `build-info.yaml` file describing your package and produces signed, versioned packages containing payload files and PowerShell install scripts. The default output format is `.msi` (Windows Installer), built natively via the DTF (WixToolset.Dtf.WindowsInstaller) API — no WiX Toolset or msiexec required.
+`cimipkg` builds `.msi` packages natively via the DTF (WixToolset.Dtf.WindowsInstaller) API and `.nupkg` packages for Chocolatey. It can be used standalone for any Windows software packaging workflow, and is also included as a submodule in [Cimian](https://github.com/windowsadmins/cimian) for enterprise software deployment.
 
 ### Output Formats
 
@@ -16,11 +16,11 @@ A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https:/
 
 ## Installation
 
-### As part of CimianTools
+### Pre-built binaries
 
-`cimipkg` is included in the [CimianTools](https://github.com/windowsadmins/cimian) build system and ships alongside all other Cimian binaries.
+Download from [Releases](https://github.com/windowsadmins/cimian-pkg/releases) (x64 and arm64 zips available). `cimipkg` is also included in the [CimianTools](https://github.com/windowsadmins/cimian) build.
 
-### Standalone build
+### Build from source
 
 ```bash
 dotnet publish -c Release -r win-x64
