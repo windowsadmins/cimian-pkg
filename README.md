@@ -4,6 +4,16 @@ A standalone Windows package builder. Define your package in a `build-info.yaml`
 
 Prebundled in [Cimian](https://github.com/windowsadmins/cimian) for enterprise software deployment.
 
+## Why cimipkg?
+
+Building an MSI shouldn't require learning WiX XML schemas and a compiler toolchain. Enterprise environments need signed packages with install scripts, but the existing tooling makes that painful — especially when you're managing dozens or hundreds of packages across an organization.
+
+`cimipkg` takes the same approach as [munkipkg](https://github.com/munki/munki-pkg) on macOS: a simple directory layout, a YAML manifest, and a single command to build. If you've used munkipkg, this will feel familiar.
+
+The project structure is the source of truth. Keep your package directories in version control and you have a complete, auditable library of every management package your team has built — not just the binaries, but the scripts, metadata, and signing configuration that produced them.
+
+See also [pkg-inspector](https://github.com/windowsadmins/pkg-inspector) for inspecting the contents of built `.msi` and `.nupkg` packages.
+
 ## Installation
 
 ### Pre-built binaries
