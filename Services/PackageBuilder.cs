@@ -71,20 +71,26 @@ public class PackageBuilder
         // Read build-info.yaml
         var buildInfo = ReadBuildInfo(projectDir);
 
-        // Process dynamic version placeholders (${TIMESTAMP}, ${DATE}, ${DATETIME})
-        buildInfo.DoSubstitutions();
+        // Load environment variables first so they are available for both YAML
+        // placeholder substitution and (later) install/uninstall script injection.
+        var envVars = LoadEnvironmentVariables(projectDir, options.EnvFilePath);
 
-        // CLI signing overrides (take precedence over build-info.yaml)
+        // Resolve ${NAME} placeholders in build-info.yaml. Built-in tokens (TIMESTAMP,
+        // DATE, DATETIME, version) still work; everything else is looked up in envVars
+        // and then the process environment. See BuildInfo.DoSubstitutions for details.
+        buildInfo.DoSubstitutions(envVars);
+
+        // CLI signing overrides (take precedence over build-info.yaml and env-resolved values)
         if (!string.IsNullOrEmpty(options.SigningThumbprint))
             buildInfo.SigningThumbprint = options.SigningThumbprint;
         if (!string.IsNullOrEmpty(options.SigningCertificate))
             buildInfo.SigningCertificate = options.SigningCertificate;
 
-        // Load environment variables
-        var envVars = LoadEnvironmentVariables(projectDir, options.EnvFilePath);
         if (envVars.Count > 0)
         {
-            _logger.LogInformation("Loaded {Count} environment variables for script injection", envVars.Count);
+            _logger.LogInformation(
+                "Loaded {Count} environment variables for YAML substitution and script injection",
+                envVars.Count);
         }
 
         // Check payload
