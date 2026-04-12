@@ -823,4 +823,10 @@ public record PackageBuildOptions
     /// Certificate subject name for signing (overrides build-info.yaml).
     /// </summary>
     public string? SigningCertificate { get; init; }
+
+    /// <summary>
+    /// Skip the post-build prompt asking whether to run <c>cimiimport</c>
+    /// on the built package. Useful for CI/CD pipelines.
+    /// </summary>
+    public bool SkipImport { get; init; }
 }

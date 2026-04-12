@@ -54,7 +54,26 @@ cimipkg --sign-thumbprint ABCDEF1234 <project-directory>
 
 # Re-sign an existing .pkg
 cimipkg --resign <path-to.pkg> --resign-cert "My Certificate Name"
+
+# Build without the post-build cimiimport prompt (CI/CD)
+cimipkg --skip-import <project-directory>
 ```
+
+### Post-build import prompt
+
+After a successful build, `cimipkg` asks whether to run `cimiimport` on the
+freshly-built package so you can push it into a Cimian repo without a second
+command. The prompt has three fast-paths so it never blocks automation:
+
+- `--skip-import` — suppresses the prompt entirely.
+- Non-interactive stdin (CI runners, piped input, IDE run-configs) — detected
+  via `Console.IsInputRedirected` and skipped silently.
+- 60-second timeout — if nobody answers, the default is **no**.
+
+When you accept, `cimipkg` launches `cimiimport <pkg-path>` with stdio
+inherited from the parent terminal so its own interactive metadata prompts
+(category, description, display name, etc.) work normally. `cimiimport` is
+resolved first from the directory next to `cimipkg`, then from `PATH`.
 
 ## Project Structure
 
