@@ -96,14 +96,59 @@ msi_properties:
   CUSTOM_PROP: "value"
 ```
 
-### Dynamic Versioning
+### Placeholders
 
-Use placeholders in the version field:
+Any scalar field in `build-info.yaml` can contain `${NAME}` placeholders, which
+`cimipkg` resolves in this order (highest priority first):
 
-- `${TIMESTAMP}` — `YYYY.MM.DD.HHMM`
-- `${DATE}` — `YYYY.MM.DD`
-- `${DATETIME}` — `YYYY.MM.DD.HHMMSS`
-- `${version}` — reference the resolved version in the name field
+1. **Built-in tokens** (always win, cannot be shadowed):
+   - `${TIMESTAMP}` → `YYYY.MM.DD.HHMM` (e.g. `2026.04.11.1723`)
+   - `${DATE}` → `YYYY.MM.DD`
+   - `${DATETIME}` → `YYYY.MM.DD.HHMMSS`
+   - `${version}` → the resolved `product.version` (only in other fields — see below)
+2. **`.env` file** in the project directory (auto-detected, or pass `--env <path>`)
+3. **Process environment variables**
+4. **Unresolved** → the literal `${NAME}` is left in place (fail-soft). The
+   downstream tool (e.g. `signtool`) surfaces the real error.
+
+`${version}` is a back-reference: inside `product.version` itself it stays
+literal, but in `product.name`, `product.identifier`, and `product.description`
+it expands to the already-resolved version.
+
+#### Fields that support placeholders
+
+- `product.version`, `product.name`, `product.identifier`, `product.description`
+- `signing_certificate`, `signing_thumbprint`
+- `install_location`, `install_arguments`, `uninstall_arguments`
+- `upgrade_code`
+
+#### Keeping signing details out of source control
+
+Consumer repos often commit `build-info.yaml` publicly but need to sign with an
+organization-specific certificate (so AV/EDR products trust the resulting
+binaries). Reference the cert via a placeholder and keep the real value in a
+gitignored `.env` or in CI environment variables:
+
+```yaml
+# build-info.yaml (committed)
+signing_thumbprint: ${SIGNING_CERT_THUMBPRINT}
+signing_certificate: ${SIGNING_CERT_SUBJECT}
+```
+
+```sh
+# .env (gitignored)
+SIGNING_CERT_THUMBPRINT=1423F241DFF85AD2C8F31DBD70FB597DAC85BA4B
+SIGNING_CERT_SUBJECT=YourOrganization Enterprise Certificate
+```
+
+The variable names are entirely your choice — `cimipkg` doesn't prescribe a
+vocabulary, it just looks up whatever `${NAME}` you wrote. The convention used
+in examples is `SIGNING_CERT_*` because that mirrors how `signtool` thinks
+about the cert. CLI flags (`--sign-thumbprint`, `--sign-cert`) still override
+anything resolved from YAML or env.
+
+The same `.env` file is also used to inject variables into install/uninstall
+scripts at build time, so one file can serve both purposes.
 
 ### MSI Version Handling
 
