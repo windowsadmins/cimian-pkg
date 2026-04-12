@@ -131,7 +131,7 @@ public class MsiBuilder
             if (hasScripts)
             {
                 _logger.LogDebug("Writing script custom actions...");
-                WriteScriptCustomActions(db, scriptsDir, envVars, installDir);
+                WriteScriptCustomActions(db, scriptsDir, envVars, installDir, buildInfo);
             }
 
             _logger.LogDebug("Committing database...");
@@ -562,7 +562,8 @@ public class MsiBuilder
         Database db,
         string scriptsDir,
         Dictionary<string, string> envVars,
-        string installDir)
+        string installDir,
+        BuildInfo buildInfo)
     {
         // Inject $payloadRoot so scripts can find staged files — matching sbin-installer behavior.
         // For installer-type (TempFolder), we can't hardcode the path — it resolves at install time.
@@ -596,17 +597,20 @@ public class MsiBuilder
 
         // Preinstall: immediate, before InstallInitialize — stops services/processes
         var preScript = preinstallScripts.Length > 0
-            ? variableHeader + CombineScripts(preinstallScripts, envVars) : "# No preinstall scripts";
+            ? SignScriptContent(variableHeader + CombineScripts(preinstallScripts, envVars), buildInfo)
+            : "# No preinstall scripts";
         WriteImmediateScriptAction(db, "CimianPreinstall", preScript);
 
         // Postinstall: immediate, AFTER InstallFinalize — all files are on disk
         var postScript = postinstallScripts.Length > 0
-            ? variableHeader + CombineScripts(postinstallScripts, envVars) : "# No postinstall scripts";
+            ? SignScriptContent(variableHeader + CombineScripts(postinstallScripts, envVars), buildInfo)
+            : "# No postinstall scripts";
         WriteImmediateScriptAction(db, "CimianPostinstall", postScript);
 
         // Uninstall: immediate, AFTER InstallFinalize during removal
         var uninstallScript = uninstallScripts.Length > 0
-            ? variableHeader + CombineScripts(uninstallScripts, envVars) : "# No uninstall scripts";
+            ? SignScriptContent(variableHeader + CombineScripts(uninstallScripts, envVars), buildInfo)
+            : "# No uninstall scripts";
         WriteImmediateScriptAction(db, "CimianUninstall", uninstallScript);
     }
 
@@ -778,6 +782,47 @@ public class MsiBuilder
         return vbs.ToString();
     }
 
+
+    /// <summary>
+    /// Signs a combined PowerShell script at build time so the temp .ps1 written
+    /// by the VBScript custom action at install time already carries a valid
+    /// Authenticode signature. This prevents EDR/AV false positives from unsigned
+    /// scripts executing out of %TEMP%, even when the parent process is msiexec.
+    ///
+    /// The signature block (<c># SIG # Begin signature block</c> … <c># SIG # End
+    /// signature block</c>) is appended to the script content before it is
+    /// base64-encoded into the VBS, so the round-trip is transparent to
+    /// <see cref="BuildScriptActionVbs"/>.
+    /// </summary>
+    private string SignScriptContent(string scriptContent, BuildInfo buildInfo)
+    {
+        if (string.IsNullOrEmpty(buildInfo.SigningCertificate) &&
+            string.IsNullOrEmpty(buildInfo.SigningThumbprint))
+            return scriptContent;
+
+        // Don't bother signing placeholder stubs
+        if (scriptContent.StartsWith("# No "))
+            return scriptContent;
+
+        var tmpPath = Path.Combine(Path.GetTempPath(), $"cimipkg-sign-{Guid.NewGuid():N}.ps1");
+        try
+        {
+            File.WriteAllText(tmpPath, scriptContent, new System.Text.UTF8Encoding(true));
+            _codeSigner.SignPowerShellScript(tmpPath, buildInfo.SigningCertificate, buildInfo.SigningThumbprint);
+            _logger.LogInformation("Signed embedded script: {TmpPath}", Path.GetFileName(tmpPath));
+            return File.ReadAllText(tmpPath);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to sign embedded script — embedding unsigned");
+            return scriptContent;
+        }
+        finally
+        {
+            try { if (File.Exists(tmpPath)) File.Delete(tmpPath); }
+            catch { /* best-effort cleanup */ }
+        }
+    }
 
     private string CombineScripts(string[] scriptFiles, Dictionary<string, string> envVars)
     {
