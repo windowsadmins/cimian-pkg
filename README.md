@@ -1,10 +1,10 @@
-# cimipkg
+# Cimian Pkg
 
 A standalone Windows package builder. Define your package in a `build-info.yaml`, add payload files and PowerShell scripts, and `cimipkg` produces signed, versioned `.msi` or `.nupkg` packages — no WiX Toolset required.
 
 Prebundled in [Cimian](https://github.com/windowsadmins/cimian) for enterprise software deployment.
 
-## Why cimipkg?
+## Why `cimipkg`?
 
 Building an MSI shouldn't require learning WiX XML schemas and a compiler toolchain. Enterprise environments need signed packages with install scripts, but the existing tooling makes that painful — especially when you're managing dozens or hundreds of packages across an organization.
 
