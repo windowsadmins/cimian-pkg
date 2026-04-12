@@ -688,7 +688,7 @@ public class MsiBuilder
 
         var vbs = new StringBuilder(base64.Length + 4096);
         vbs.Append("On Error Resume Next\r\n");
-        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe\r\n");
+        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
         vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
@@ -709,13 +709,16 @@ public class MsiBuilder
         // instead of silently failing under 5.1 when pwsh is installed.
         //
         // Probing via `fso.FileExists` is cheap (no disk IO beyond a directory
-        // lookup) and keeps the resolver fully local to the custom action - no
-        // PATH dependency, no environment variable lookups, no registry reads.
-        vbs.Append("psExe = \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\r\n");
-        vbs.Append("If fso.FileExists(\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\") Then\r\n");
-        vbs.Append("  psExe = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"\r\n");
-        vbs.Append("ElseIf fso.FileExists(\"C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe\") Then\r\n");
-        vbs.Append("  psExe = \"C:\\Program Files\\PowerShell\\7-preview\\pwsh.exe\"\r\n");
+        // lookup) and keeps the resolver fully local to the custom action — no
+        // PATH dependency, no registry reads. We expand %SystemRoot% and
+        // %ProgramW6432% at install time so the MSI works on any drive letter.
+        vbs.Append("sysRoot = ws.ExpandEnvironmentStrings(\"%SystemRoot%\")\r\n");
+        vbs.Append("progFiles = ws.ExpandEnvironmentStrings(\"%ProgramW6432%\")\r\n");
+        vbs.Append("psExe = sysRoot & \"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\r\n");
+        vbs.Append("If fso.FileExists(progFiles & \"\\PowerShell\\7\\pwsh.exe\") Then\r\n");
+        vbs.Append("  psExe = progFiles & \"\\PowerShell\\7\\pwsh.exe\"\r\n");
+        vbs.Append("ElseIf fso.FileExists(progFiles & \"\\PowerShell\\7-preview\\pwsh.exe\") Then\r\n");
+        vbs.Append("  psExe = progFiles & \"\\PowerShell\\7-preview\\pwsh.exe\"\r\n");
         vbs.Append("End If\r\n");
         vbs.Append($"Session.Log \"{actionName}: using \" & psExe\r\n");
         vbs.Append("b64 = \"\"\r\n");
@@ -729,6 +732,10 @@ public class MsiBuilder
         // MSXML base64 decode -> binary stream -> temp file.
         // Msxml2.DOMDocument.6.0 and ADODB.Stream are both part of the Windows
         // base image since XP, so they are available inside the msiexec sandbox.
+        // Clear Err before staging so the check at the end only catches staging
+        // failures (decode/write), not earlier non-fatal errors from e.g. env
+        // variable assignment or fso.FileExists probes.
+        vbs.Append("Err.Clear\r\n");
         vbs.Append("Set xml = CreateObject(\"Msxml2.DOMDocument.6.0\")\r\n");
         vbs.Append("Set node = xml.CreateElement(\"b\")\r\n");
         vbs.Append("node.DataType = \"bin.base64\"\r\n");

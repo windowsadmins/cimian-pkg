@@ -66,7 +66,7 @@ public class MsiBuilderTests
     [Fact]
     public void BuildScriptActionVbs_ExtremelyLargeScript_StillValid()
     {
-        // 60 KB PowerShell source -> ~120 KB UTF-16 -> ~160 KB base64.
+        // 60 KB PowerShell source -> ~60 KB UTF-8 (with BOM) -> ~80 KB base64.
         // Still has to chunk down to <1000 char lines.
         var huge = BuildLargePowerShellScript(60_000);
 
@@ -79,14 +79,14 @@ public class MsiBuilderTests
     public void BuildScriptActionVbs_RoundTrip_PreservesScriptContentExactly()
     {
         // Pick a script with characters that would otherwise need escaping in VBS
-        // string literals (quotes, backslashes, UTF-16 surrogates, newlines).
+        // string literals (quotes, backslashes, Unicode via UTF-8, newlines).
         var original =
             "# Cimian postinstall\r\n" +
             "$path = 'C:\\Program Files\\Foo\\bar.exe'\r\n" +
             "Write-Host \"Installing to $path\"\r\n" +
             "if (Test-Path $path) { Write-Host 'already there' }\r\n" +
             "Get-ScheduledTask | Where-Object { $_.Name -eq 'X' }\r\n" +
-            // Some unicode to make sure UTF-16 survives intact.
+            // Some unicode to make sure UTF-8 round-trips correctly.
             "# emoji: \u2713 check mark\r\n";
 
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", original);
@@ -135,16 +135,14 @@ public class MsiBuilderTests
         // every supported Windows image.
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
 
-        // Both the fallback and the upgrade paths must be in the generated VBS.
-        Assert.Contains(
-            "psExe = \"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"",
-            vbs);
-        Assert.Contains(
-            "fso.FileExists(\"C:\\Program Files\\PowerShell\\7\\pwsh.exe\")",
-            vbs);
-        Assert.Contains(
-            "psExe = \"C:\\Program Files\\PowerShell\\7\\pwsh.exe\"",
-            vbs);
+        // Paths must be resolved via env expansion at install time, not hardcoded
+        // to C:\ — ensures the MSI works regardless of OS drive letter.
+        Assert.Contains("ws.ExpandEnvironmentStrings(\"%SystemRoot%\")", vbs);
+        Assert.Contains("ws.ExpandEnvironmentStrings(\"%ProgramW6432%\")", vbs);
+        // Fallback to 5.1 via %SystemRoot%
+        Assert.Contains("sysRoot & \"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"", vbs);
+        // Upgrade to pwsh 7 via %ProgramW6432%
+        Assert.Contains("progFiles & \"\\PowerShell\\7\\pwsh.exe\"", vbs);
         // 7-preview is probed as a courtesy for dev machines.
         Assert.Contains("7-preview", vbs);
     }
