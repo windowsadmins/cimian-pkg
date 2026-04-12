@@ -1,4 +1,6 @@
+using System;
 using System.Collections.Generic;
+using System.Text.RegularExpressions;
 using YamlDotNet.Serialization;
 
 namespace Cimian.CLI.Cimipkg.Models;
@@ -14,85 +16,84 @@ public class BuildInfo
     [YamlMember(Alias = "product")]
     public ProductInfo Product { get; set; } = new();
 
+    private static readonly Regex PlaceholderRegex =
+        new(@"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", RegexOptions.Compiled);
+
     /// <summary>
-    /// Processes dynamic version placeholders in the version field.
-    /// Supports ${TIMESTAMP}, ${DATE}, and ${DATETIME} placeholders.
-    /// Also supports ${version} in the name field after version is resolved.
+    /// Resolves <c>${NAME}</c> placeholders in build-info.yaml fields.
+    /// Resolution order per placeholder:
+    ///   1. Built-in tokens: ${TIMESTAMP}, ${DATE}, ${DATETIME}, ${version}
+    ///   2. <paramref name="envVars"/> dictionary (typically from a .env file)
+    ///   3. Process environment variables
+    ///   4. Unresolved placeholders are left literal (fail-soft)
     /// </summary>
-    public void DoSubstitutions()
+    /// <param name="envVars">
+    /// Optional dictionary of variables (e.g. loaded from a .env file) used for placeholder
+    /// resolution. Keys are matched case-insensitively when the dictionary is built with
+    /// <see cref="StringComparer.OrdinalIgnoreCase"/>.
+    /// </param>
+    public void DoSubstitutions(Dictionary<string, string>? envVars = null)
     {
-        // Process dynamic version placeholders in the version field first
-        // ${TIMESTAMP} -> YYYY.MM.DD.HHMM (e.g., 2025.12.09.1455)
-        if (!string.IsNullOrEmpty(Product.Version) && Product.Version.Contains("${TIMESTAMP}"))
-        {
-            Product.Version = Product.Version.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
-        }
+        // Pass 1: resolve Product.Version first so ${version} back-references can see the
+        // final value in pass 2. ${version} inside Product.Version itself is left literal.
+        Product.Version = Expand(Product.Version, envVars, versionValue: null) ?? Product.Version;
 
-        // ${DATE} -> YYYY.MM.DD (e.g., 2025.12.09)
-        if (!string.IsNullOrEmpty(Product.Version) && Product.Version.Contains("${DATE}"))
-        {
-            Product.Version = Product.Version.Replace("${DATE}", DynamicVersion.Date);
-        }
+        var v = Product.Version;
 
-        // ${DATETIME} -> YYYY.MM.DD.HHMMSS (e.g., 2025.12.09.145530)
-        if (!string.IsNullOrEmpty(Product.Version) && Product.Version.Contains("${DATETIME}"))
-        {
-            Product.Version = Product.Version.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
-        }
+        // Pass 2: everything else — ${version} is now available.
+        Product.Name        = Expand(Product.Name,        envVars, v) ?? Product.Name;
+        Product.Identifier  = Expand(Product.Identifier,  envVars, v) ?? Product.Identifier;
+        Product.Description = Expand(Product.Description, envVars, v);
 
-        // Now process name substitutions - support dynamic placeholders directly in name
-        if (!string.IsNullOrEmpty(Product.Name))
+        SigningCertificate  = Expand(SigningCertificate,  envVars, v);
+        SigningThumbprint   = Expand(SigningThumbprint,   envVars, v);
+        InstallLocation     = Expand(InstallLocation,     envVars, v);
+        InstallArguments    = Expand(InstallArguments,    envVars, v);
+        UninstallArguments  = Expand(UninstallArguments,  envVars, v);
+        UpgradeCode         = Expand(UpgradeCode,         envVars, v);
+    }
+
+    private static string? Expand(
+        string? input,
+        Dictionary<string, string>? envVars,
+        string? versionValue)
+    {
+        if (string.IsNullOrEmpty(input)) return input;
+        if (!input.Contains("${")) return input; // fast path: no placeholder present
+
+        return PlaceholderRegex.Replace(input, match =>
         {
-            // ${TIMESTAMP} in name
-            if (Product.Name.Contains("${TIMESTAMP}"))
+            var name = match.Groups[1].Value;
+
+            // 1. Built-in date/time tokens and ${version} back-reference.
+            switch (name)
             {
-                Product.Name = Product.Name.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
+                case "TIMESTAMP": return DynamicVersion.Timestamp;
+                case "DATE":      return DynamicVersion.Date;
+                case "DATETIME":  return DynamicVersion.DateTimeStamp;
+                case "version":
+                    // ${version} only resolves when we have a resolved version value to
+                    // substitute (i.e. not when expanding Product.Version itself).
+                    return !string.IsNullOrEmpty(versionValue) ? versionValue : match.Value;
             }
 
-            // ${DATE} in name
-            if (Product.Name.Contains("${DATE}"))
+            // 2. .env file dictionary (case-insensitivity provided by caller's comparer).
+            if (envVars != null && envVars.TryGetValue(name, out var envVal)
+                && !string.IsNullOrEmpty(envVal))
             {
-                Product.Name = Product.Name.Replace("${DATE}", DynamicVersion.Date);
+                return envVal;
             }
 
-            // ${DATETIME} in name
-            if (Product.Name.Contains("${DATETIME}"))
+            // 3. Process environment variables.
+            var osVal = Environment.GetEnvironmentVariable(name);
+            if (!string.IsNullOrWhiteSpace(osVal))
             {
-                Product.Name = Product.Name.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
+                return osVal;
             }
 
-            // ${version} in name - uses the already-resolved version value
-            if (Product.Name.Contains("${version}") && !string.IsNullOrEmpty(Product.Version))
-            {
-                Product.Name = Product.Name.Replace("${version}", Product.Version);
-            }
-        }
-
-        // Process substitutions in identifier
-        if (!string.IsNullOrEmpty(Product.Identifier))
-        {
-            if (Product.Identifier.Contains("${version}") && !string.IsNullOrEmpty(Product.Version))
-                Product.Identifier = Product.Identifier.Replace("${version}", Product.Version);
-            if (Product.Identifier.Contains("${TIMESTAMP}"))
-                Product.Identifier = Product.Identifier.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
-            if (Product.Identifier.Contains("${DATE}"))
-                Product.Identifier = Product.Identifier.Replace("${DATE}", DynamicVersion.Date);
-            if (Product.Identifier.Contains("${DATETIME}"))
-                Product.Identifier = Product.Identifier.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
-        }
-
-        // Process substitutions in description
-        if (!string.IsNullOrEmpty(Product.Description))
-        {
-            if (Product.Description.Contains("${version}") && !string.IsNullOrEmpty(Product.Version))
-                Product.Description = Product.Description.Replace("${version}", Product.Version);
-            if (Product.Description.Contains("${TIMESTAMP}"))
-                Product.Description = Product.Description.Replace("${TIMESTAMP}", DynamicVersion.Timestamp);
-            if (Product.Description.Contains("${DATE}"))
-                Product.Description = Product.Description.Replace("${DATE}", DynamicVersion.Date);
-            if (Product.Description.Contains("${DATETIME}"))
-                Product.Description = Product.Description.Replace("${DATETIME}", DynamicVersion.DateTimeStamp);
-        }
+            // 4. Unresolved — leave the literal ${NAME} token in place.
+            return match.Value;
+        });
     }
 
     /// <summary>
