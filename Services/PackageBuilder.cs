@@ -127,28 +127,17 @@ public class PackageBuilder
         // Build the appropriate package format (default: MSI)
         string packagePath;
         // TODO(pkg-sunset): Remove BuildPkg branch and BuildPkgPackage method
+        // TODO(pkg-sunset): Remove BuildPkg branch and BuildPkgPackage method
         if (options.BuildPkg)
         {
             _logger.LogInformation("Building .pkg format (sbin-installer compatible)");
             packagePath = BuildPkgPackage(buildInfo, projectDir, versionResult.OriginalVersion, envVars);
-
-            if (options.BuildIntunewin)
-            {
-                _logger.LogWarning("--intunewin flag is only supported with --nupkg format. Ignoring.");
-            }
         }
         else if (options.BuildNupkg)
         {
             _logger.LogInformation("Building .nupkg format (Chocolatey compatible)");
             packagePath = BuildNupkgPackage(buildInfo, projectDir, versionResult.OriginalVersion,
                 isInstallerPackage, hasPayloadFiles, envVars);
-
-            // Build .intunewin if requested
-            if (options.BuildIntunewin)
-            {
-                _logger.LogInformation("Building .intunewin package...");
-                BuildIntuneWin(packagePath);
-            }
         }
         else
         {
@@ -156,6 +145,13 @@ public class PackageBuilder
             var msiBuilder = new MsiBuilder(_logger, _codeSigner, _scriptProcessor, _yamlSerializer);
             packagePath = msiBuilder.Build(buildInfo, projectDir, versionResult.OriginalVersion,
                 hasPayloadFiles, envVars);
+        }
+
+        // Build .intunewin if requested (supports both .msi and .nupkg)
+        if (options.BuildIntunewin)
+        {
+            _logger.LogInformation("Building .intunewin package...");
+            BuildIntuneWin(packagePath);
         }
 
         _logger.LogInformation("Package created successfully: {PackagePath}", packagePath);
@@ -505,9 +501,11 @@ install_location: C:\
     }
 
     /// <summary>
-    /// Builds a .intunewin package from a .nupkg.
+    /// Builds a .intunewin package from an .msi or .nupkg.
+    /// For .msi the MSI is the setup file directly (no wrapper script needed).
+    /// For .nupkg a Chocolatey Install.ps1 wrapper is generated as the setup file.
     /// </summary>
-    private void BuildIntuneWin(string nupkgPath)
+    private void BuildIntuneWin(string packagePath)
     {
         // Check for IntuneWinAppUtil.exe
         try
@@ -537,30 +535,41 @@ install_location: C:\
             return;
         }
 
+        var packageName = Path.GetFileName(packagePath);
+        var isMsi = packagePath.EndsWith(".msi", StringComparison.OrdinalIgnoreCase);
+
         // Create temp directory
         var tempDir = Path.Combine(Path.GetTempPath(), $"intunewin_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
         try
         {
-            // Copy nupkg to temp
-            var nupkgName = Path.GetFileName(nupkgPath);
-            var destNupkg = Path.Combine(tempDir, nupkgName);
-            File.Copy(nupkgPath, destNupkg);
+            // Copy package to temp
+            File.Copy(packagePath, Path.Combine(tempDir, packageName));
 
-            // Create Install.ps1
-            var installPs1 = CreateIntuneWinInstallScript(nupkgName);
-            var installPath = Path.Combine(tempDir, "Install.ps1");
-            File.WriteAllText(installPath, installPs1);
+            // Determine the setup file for IntuneWinAppUtil
+            string setupFile;
+            if (isMsi)
+            {
+                // MSI is the setup file directly — Intune knows how to install MSIs natively
+                setupFile = packageName;
+            }
+            else
+            {
+                // nupkg needs a Chocolatey wrapper script
+                var installPs1 = CreateIntuneWinInstallScript(packageName);
+                File.WriteAllText(Path.Combine(tempDir, "Install.ps1"), installPs1);
+                setupFile = "Install.ps1";
+            }
 
             // Run IntuneWinAppUtil
-            var outDir = Path.GetDirectoryName(nupkgPath) ?? ".";
+            var outDir = Path.GetDirectoryName(packagePath) ?? ".";
             RunCommand("IntuneWinAppUtil.exe",
-                $"-c \"{tempDir}\" -s \"Install.ps1\" -o \"{outDir}\"");
+                $"-c \"{tempDir}\" -s \"{setupFile}\" -o \"{outDir}\"");
 
-            // Rename output
-            var baseName = Path.GetFileNameWithoutExtension(nupkgName);
-            var defaultIntunewin = Path.Combine(outDir, "Install.intunewin");
+            // Rename output from default name to match package
+            var baseName = Path.GetFileNameWithoutExtension(packageName);
+            var defaultIntunewin = Path.Combine(outDir, $"{Path.GetFileNameWithoutExtension(setupFile)}.intunewin");
             var finalIntunewin = Path.Combine(outDir, $"{baseName}.intunewin");
 
             if (File.Exists(defaultIntunewin))
@@ -814,7 +823,7 @@ public record PackageBuildOptions
     public bool BuildNupkg { get; init; }
 
     /// <summary>
-    /// Also generate .intunewin from .nupkg (only with BuildNupkg).
+    /// Also generate .intunewin for Intune deployment (works with .msi and .nupkg).
     /// </summary>
     public bool BuildIntunewin { get; init; }
 
