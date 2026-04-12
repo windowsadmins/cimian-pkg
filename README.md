@@ -4,7 +4,7 @@ A standalone tool for building `.msi`, `.pkg`, and `.nupkg` packages for [Cimian
 
 ## Overview
 
-`cimipkg` reads a `build-info.yaml` file describing your package and produces signed, versioned packages containing payload files and lifecycle scripts. The default output format is `.msi` (Windows Installer), built natively via the DTF (WixToolset.Dtf.WindowsInstaller) API — no WiX Toolset or msiexec required.
+`cimipkg` reads a `build-info.yaml` file describing your package and produces signed, versioned packages containing payload files and PowerShell install scripts. The default output format is `.msi` (Windows Installer), built natively via the DTF (WixToolset.Dtf.WindowsInstaller) API — no WiX Toolset or msiexec required.
 
 ### Output Formats
 
@@ -83,12 +83,16 @@ The same project structure works for all output formats:
 my-package/
 ├── build-info.yaml    # Package metadata (required)
 ├── payload/           # Files to install (optional)
-└── scripts/           # Lifecycle scripts (optional)
-    ├── preinstall.ps1
-    ├── postinstall.ps1
-    ├── preuninstall.ps1
-    └── postuninstall.ps1
+├── .env               # Environment variables for signing + scripts (optional, gitignored)
+└── scripts/           # PowerShell install/uninstall scripts (optional)
+    ├── preinstall.ps1     # Runs before payload is copied
+    ├── postinstall.ps1    # Runs after payload is copied
+    └── uninstall.ps1      # Runs when the package is removed
 ```
+
+Scripts are numbered if you need ordering (`preinstall01.ps1`, `preinstall02.ps1`, etc.)
+and are combined into a single custom action per phase at build time. The `uninstall.ps1`
+script runs during MSI removal (`msiexec /x`) or Chocolatey `choco uninstall`.
 
 ## build-info.yaml
 
@@ -98,7 +102,7 @@ product:
   version: 2025.12.09
   developer: MyCompany
   identifier: com.mycompany.myapp
-description: My application package
+  description: My application package
 install_location: C:\Program Files\MyApp
 postinstall_action: none
 signing_certificate: My Certificate Name
