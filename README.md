@@ -11,7 +11,7 @@ A standalone tool for building `.msi` and `.nupkg` packages for [Cimian](https:/
 | Format | Flag | Description |
 |--------|------|-------------|
 | `.msi` | *(default)* | Native Windows Installer package via DTF. Embeds payload in CAB, scripts as custom actions, full build-info.yaml round-trip via `CIMIAN_PKG_BUILD_INFO` property. |
-| `.nupkg` | `--nupkg` | Chocolatey-compatible NuGet package. Add `--intunewin` to also generate `.intunewin`. |
+| `.nupkg` | `--nupkg` | Chocolatey-compatible NuGet package. |
 
 
 ## Installation
@@ -39,7 +39,8 @@ cimipkg --verbose <project-directory>
 # Build .nupkg format
 cimipkg --nupkg <project-directory>
 
-# Build .nupkg + .intunewin
+# Also generate .intunewin for Intune deployment (works with .msi or .nupkg)
+cimipkg --intunewin <project-directory>
 cimipkg --nupkg --intunewin <project-directory>
 
 # Create a new project scaffold
