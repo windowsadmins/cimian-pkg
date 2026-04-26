@@ -103,7 +103,7 @@ public class MsiBuilder
 
             _logger.LogDebug("Writing directory table...");
             var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
-            WriteDirectoryTable(db, buildInfo.InstallLocation, isInstallerType, productName);
+            WriteDirectoryTable(db, buildInfo.InstallLocation ?? string.Empty, isInstallerType, productName);
 
             // For scripts: installDir is where MSI puts files. For installer-type, this is
             // TempFolder\p_{guid} (resolved at install time). For copy-type, it's the actual path.
@@ -145,7 +145,7 @@ public class MsiBuilder
         if (payloadFiles.Length > 0)
         {
             _logger.LogInformation("Creating and embedding CAB archive ({Count} files)...", payloadFiles.Length);
-            EmbedPayloadCab(msiPath, payloadDir, payloadFiles);
+            EmbedPayloadCab(msiPath, payloadDir, payloadFiles, identifier);
         }
 
         _logger.LogInformation("MSI database created successfully");
@@ -274,20 +274,52 @@ public class MsiBuilder
         // Cimian-specific properties
         SetProperty("CIMIAN_IDENTIFIER", identifier);
         SetProperty("CIMIAN_FULL_VERSION", fullVersion);
-        SetProperty("CIMIAN_PKG_BUILD_INFO", buildInfoYaml);
+        // CIMIAN_PKG_BUILD_INFO is the signal that downstream readers
+        // (MsiPropertyReader, MsiMetadata.IsCimianPackage) use to recognize a
+        // cimipkg-built MSI. It MUST stay present. Encode the YAML as base64 so
+        // the value is single-line: a multi-line Property value confuses MSI's
+        // verbose property dump (subsequent properties appear concatenated) and
+        // — far worse — caused PREVIOUSVERSIONSINSTALLED to resolve to the YAML
+        // blob at runtime, breaking every condition that referenced it.
+        // MsiPropertyReader.ReadMetadata transparently base64-decodes when it
+        // sees a value matching this shape; older readers will see an opaque
+        // string but IsCimianPackage stays true (non-empty value).
+        if (!string.IsNullOrEmpty(buildInfoYaml))
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(buildInfoYaml));
+            SetProperty("CIMIAN_PKG_BUILD_INFO", encoded);
+        }
 
-        // Upgrade-related
-        SetProperty("PREVIOUSVERSIONSINSTALLED", "");
-        SetProperty("SecureCustomProperties", "PREVIOUSVERSIONSINSTALLED");
-
-        // Custom MSI properties from build-info.yaml
+        // SecureCustomProperties lets Windows Installer honor PREVIOUSVERSIONSINSTALLED
+        // when it's populated by FindRelatedProducts during a major upgrade.
+        // We deliberately do NOT pre-set PREVIOUSVERSIONSINSTALLED to an empty
+        // default — WiX doesn't, and doing so makes the Property dump log lines
+        // collide with any adjacent multi-line property.
+        // Apply user-supplied msi_properties FIRST so we can merge our required
+        // PREVIOUSVERSIONSINSTALLED value into any user-provided
+        // SecureCustomProperties instead of throwing on a duplicate insert.
+        var userSecureCustomProperties = string.Empty;
         if (buildInfo.MsiProperties != null)
         {
             foreach (var (key, value) in buildInfo.MsiProperties)
             {
+                if (string.Equals(key, "SecureCustomProperties", StringComparison.Ordinal))
+                {
+                    userSecureCustomProperties = value ?? string.Empty;
+                    continue;
+                }
                 SetProperty(key, value);
             }
         }
+
+        var secureCustomProperties = string.IsNullOrWhiteSpace(userSecureCustomProperties)
+            ? "PREVIOUSVERSIONSINSTALLED"
+            : userSecureCustomProperties
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Append("PREVIOUSVERSIONSINSTALLED")
+                .Distinct(StringComparer.Ordinal)
+                .Aggregate((a, b) => $"{a};{b}");
+        SetProperty("SecureCustomProperties", secureCustomProperties);
     }
 
     private static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
@@ -366,6 +398,17 @@ public class MsiBuilder
         db.Execute(
             "INSERT INTO `Feature` (`Feature`, `Feature_Parent`, `Title`, `Description`, `Display`, `Level`, `Directory_`, `Attributes`) VALUES ('DefaultFeature', '', 'Complete', 'Full installation', 1, 1, 'INSTALLDIR', 0)");
 
+        // Cache of created Directory rows, keyed by cumulative sub-path beneath INSTALLDIR.
+        // Each segment becomes its own Directory row (MSI's DefaultDir column cannot
+        // encode a multi-segment path — '|' there is the short|long separator, not a
+        // path delimiter). Without proper nesting, every file with a path like
+        // "runtimes/win/lib/net9.0/Modules/X/Y.psd1" collapses into INSTALLDIR, which
+        // collides with other files of the same basename under different parents.
+        var dirCache = new Dictionary<string, string>(StringComparer.Ordinal)
+        {
+            [string.Empty] = "INSTALLDIR",
+        };
+
         int sequence = 1;
         foreach (var filePath in payloadFiles)
         {
@@ -378,34 +421,17 @@ public class MsiBuilder
             var componentKey = $"C_{SanitizeIdentifier(relativePath)}";
             var fileKey = $"F_{SanitizeIdentifier(relativePath)}";
 
-            // Ensure keys fit within 72-char MSI limit
+            // Ensure keys fit within 72-char MSI limit. The GUID-N form is 34 chars, which is
+            // already safely below 72 — no substring needed (and substring would throw on a
+            // 34-char input).
             if (componentKey.Length > 72)
-                componentKey = $"C_{componentId:N}"[..72];
+                componentKey = $"C_{componentId:N}";
             if (fileKey.Length > 72)
-                fileKey = $"F_{componentId:N}"[..72];
+                fileKey = $"F_{componentId:N}";
 
-            // Determine directory for subdirectories in payload
-            var subDir = Path.GetDirectoryName(relativePath)?.Replace('/', '\\');
-            var directoryRef = "INSTALLDIR";
-            if (!string.IsNullOrEmpty(subDir))
-            {
-                var dirKey = $"D_{SanitizeIdentifier(subDir)}";
-                if (dirKey.Length > 72)
-                    dirKey = $"D_{Guid.NewGuid():N}"[..72];
-
-                // Create subdirectory entry if not exists
-                try
-                {
-                    db.Execute($"INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('{EscSql(dirKey)}', 'INSTALLDIR', '{EscSql(subDir.Replace('\\', '|'))}')");
-
-                }
-                catch
-                {
-                    // Directory already exists
-                }
-
-                directoryRef = dirKey;
-            }
+            // Walk the relative path's parent segments, creating nested Directory rows on
+            // demand. Returns the Directory identifier to use as Component.Directory_.
+            var directoryRef = EnsureDirectoryChain(db, dirCache, Path.GetDirectoryName(relativePath));
 
             // MSI FileName format: "ShortName|LongName"
             var shortName = GenerateShortName(fileName, sequence);
@@ -531,9 +557,17 @@ public class MsiBuilder
 
         if (hasScripts)
         {
-            // Preinstall: immediate — runs before InstallInitialize, stops services/processes.
-            // Condition: runs on fresh install and major upgrade, but NOT standalone uninstall.
-            AddAction("CimianPreinstall", "NOT (REMOVE=\"ALL\")", 1498);
+            // Preinstall fires only when a prior install is on the box — major upgrade
+            // (PREVIOUSVERSIONSINSTALLED is set by FindRelatedProducts via the Upgrade
+            // table) or a reinstall (REINSTALL is set by msiexec /fvomus or by the
+            // Windows Installer when the user re-runs the MSI over the same ProductCode).
+            // Fresh installs skip it entirely: there is nothing to "pre", which
+            // eliminates the SYSTEM-context pwsh.exe spawn that EDR flags on a
+            // first-time fleet rollout.
+            AddAction(
+                "CimianPreinstall",
+                "PREVIOUSVERSIONSINSTALLED OR REINSTALL",
+                1498);
         }
 
         if (hasPayload)
@@ -550,11 +584,17 @@ public class MsiBuilder
 
         if (hasScripts)
         {
-            // Postinstall: immediate AFTER InstallFinalize — all files on disk.
-            // Condition: NOT a standalone uninstall. Runs on fresh install AND major upgrade.
+            // Postinstall fires on fresh install AND upgrade new-install pass — anything
+            // that isn't a removal. File operations are complete at this point.
             AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6601);
-            // Uninstall: runs ONLY during standalone uninstall (not during major upgrade removal)
-            AddAction("CimianUninstall", "REMOVE=\"ALL\"", 6602);
+            // Uninstall fires only on standalone uninstall, NOT on the upgrade-driven
+            // removal pass of the previous product (UPGRADINGPRODUCTCODE is set by
+            // Windows Installer during that pass). Running uninstall.ps1 during an
+            // upgrade would tear down state that postinstall.ps1 is about to re-create.
+            AddAction(
+                "CimianUninstall",
+                "(REMOVE=\"ALL\") AND NOT UPGRADINGPRODUCTCODE",
+                6602);
         }
     }
 
@@ -693,12 +733,32 @@ public class MsiBuilder
         var vbs = new StringBuilder(base64.Length + 4096);
         vbs.Append("On Error Resume Next\r\n");
         vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
+        vbs.Append("Dim cimianPhase, cimianRemove, cimianUpgrading, cimianPrevious\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
         vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
         // surfaces the extraction dir - preinstall/postinstall scripts can read
         // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n");
+        // Compute install phase from standard MSI properties so scripts don't have to
+        // re-parse them. UPGRADINGPRODUCTCODE is set only on the previous-version
+        // removal pass of a major upgrade. PREVIOUSVERSIONSINSTALLED is populated by
+        // FindRelatedProducts (via the Upgrade table) during the new-version install
+        // pass of a major upgrade. Everything else is a fresh install.
+        vbs.Append("cimianRemove = Session.Property(\"REMOVE\")\r\n");
+        vbs.Append("cimianUpgrading = Session.Property(\"UPGRADINGPRODUCTCODE\")\r\n");
+        vbs.Append("cimianPrevious = Session.Property(\"PREVIOUSVERSIONSINSTALLED\")\r\n");
+        vbs.Append("If cimianRemove = \"ALL\" And Len(cimianUpgrading) = 0 Then\r\n");
+        vbs.Append("  cimianPhase = \"uninstall\"\r\n");
+        vbs.Append("ElseIf Len(cimianPrevious) > 0 Or Len(Session.Property(\"Installed\")) > 0 Then\r\n");
+        vbs.Append("  cimianPhase = \"upgrade\"\r\n");
+        vbs.Append("Else\r\n");
+        vbs.Append("  cimianPhase = \"fresh\"\r\n");
+        vbs.Append("End If\r\n");
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PHASE\") = cimianPhase\r\n");
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_VERSION\") = Session.Property(\"ProductVersion\")\r\n");
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PREVIOUS_PRODUCT_CODE\") = cimianPrevious\r\n");
+        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & Session.Property(\"ProductVersion\") & \" previous=\" & cimianPrevious\r\n");
         //
         // Resolve the PowerShell runtime at install time so the same cimipkg MSI
         // works on endpoints with or without PowerShell 7 installed:
@@ -861,7 +921,7 @@ public class MsiBuilder
     /// Create a CAB file from payload files and embed it inside the MSI as a stream.
     /// The CAB file names must match the File table keys (e.g., F_hello_txt).
     /// </summary>
-    private void EmbedPayloadCab(string msiPath, string payloadDir, string[] payloadFiles)
+    private void EmbedPayloadCab(string msiPath, string payloadDir, string[] payloadFiles, string identifier)
     {
         var tempDir = Path.Combine(Path.GetTempPath(), $"cimipkg_cab_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
@@ -879,10 +939,12 @@ public class MsiBuilder
                 var relativePath = Path.GetRelativePath(payloadDir, filePath).Replace('\\', '/');
                 var fileKey = $"F_{SanitizeIdentifier(relativePath)}";
 
-                // Match the truncation logic from WritePayloadTables
-                var componentId = UpgradeCodeGenerator.GenerateComponentId("", relativePath);
+                // Match the truncation logic from WritePayloadTables — must use the
+                // same identifier so the deterministic componentId matches, otherwise
+                // File.File points at one key while the CAB contains another.
+                var componentId = UpgradeCodeGenerator.GenerateComponentId(identifier, relativePath);
                 if (fileKey.Length > 72)
-                    fileKey = $"F_{componentId:N}"[..72];
+                    fileKey = $"F_{componentId:N}";
 
                 fileMapping.Add((fileKey, filePath));
                 sequence++;
@@ -923,9 +985,15 @@ public class MsiBuilder
             };
 
             using var process = Process.Start(psi)!;
-            var output = process.StandardOutput.ReadToEnd();
-            var error = process.StandardError.ReadToEnd();
+            // Read both streams concurrently to avoid a deadlock: synchronous ReadToEnd
+            // on stdout blocks until the pipe is closed, but if makecab fills its stderr
+            // pipe buffer first it blocks waiting to write, and the process never exits.
+            // This reliably bit large payloads (~600+ files / ~160 MB CAB) on arm64.
+            var stdoutTask = process.StandardOutput.ReadToEndAsync();
+            var stderrTask = process.StandardError.ReadToEndAsync();
             process.WaitForExit();
+            var output = stdoutTask.GetAwaiter().GetResult();
+            var error = stderrTask.GetAwaiter().GetResult();
 
             if (process.ExitCode != 0)
             {
@@ -984,6 +1052,47 @@ public class MsiBuilder
             3 => $"{parts[0]}.{parts[1]}.{parts[2]}.0",
             _ => $"{parts[0]}.{parts[1]}.{parts[2]}.{parts[3]}",
         };
+    }
+
+    /// <summary>
+    /// Create nested Directory rows for each segment of <paramref name="relativeDir"/>
+    /// (forward- or back-slash separated, relative to INSTALLDIR). Reuses previously
+    /// created rows via <paramref name="cache"/>. Returns the Directory identifier of
+    /// the deepest segment.
+    /// </summary>
+    private static string EnsureDirectoryChain(
+        Database db,
+        Dictionary<string, string> cache,
+        string? relativeDir)
+    {
+        if (string.IsNullOrEmpty(relativeDir))
+            return cache[string.Empty];
+
+        var segments = relativeDir.Split(['/', '\\'], StringSplitOptions.RemoveEmptyEntries);
+        var cumulative = string.Empty;
+        var parentId = cache[string.Empty];
+
+        foreach (var segment in segments)
+        {
+            cumulative = cumulative.Length == 0 ? segment : $"{cumulative}/{segment}";
+            if (cache.TryGetValue(cumulative, out var existing))
+            {
+                parentId = existing;
+                continue;
+            }
+
+            var dirId = $"D_{SanitizeIdentifier(cumulative)}";
+            if (dirId.Length > 72)
+                dirId = $"D_{Guid.NewGuid():N}";
+
+            db.Execute(
+                $"INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('{EscSql(dirId)}', '{EscSql(parentId)}', '{EscSql(segment)}')");
+
+            cache[cumulative] = dirId;
+            parentId = dirId;
+        }
+
+        return parentId;
     }
 
     private static string SanitizeIdentifier(string input)
