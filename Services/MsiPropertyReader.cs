@@ -1,3 +1,4 @@
+using System.Text;
 using Cimian.CLI.Cimipkg.Models;
 using Microsoft.Extensions.Logging;
 using WixToolset.Dtf.WindowsInstaller;
@@ -41,8 +42,13 @@ public class MsiPropertyReader
             metadata.UpgradeCode = ReadProperty(db, "UpgradeCode") ?? string.Empty;
             metadata.Description = ReadProperty(db, "ARPCOMMENTS") ?? string.Empty;
 
-            // Cimian-specific properties
-            metadata.BuildInfoYaml = ReadProperty(db, "CIMIAN_PKG_BUILD_INFO");
+            // Cimian-specific properties. CIMIAN_PKG_BUILD_INFO is now stored as
+            // base64-encoded YAML so the Property value stays single-line (a
+            // multi-line value used to break MSI condition evaluation by
+            // bleeding into adjacent properties at install time). Decode if
+            // possible; fall back to the raw string for MSIs built before the
+            // base64 change so older artifacts still expose their YAML.
+            metadata.BuildInfoYaml = DecodeBuildInfoYaml(ReadProperty(db, "CIMIAN_PKG_BUILD_INFO"));
             metadata.FullVersion = ReadProperty(db, "CIMIAN_FULL_VERSION") ?? metadata.ProductVersion;
             metadata.Identifier = ReadProperty(db, "CIMIAN_IDENTIFIER") ?? string.Empty;
 
@@ -70,6 +76,32 @@ public class MsiPropertyReader
         }
 
         return metadata;
+    }
+
+    /// <summary>
+    /// CIMIAN_PKG_BUILD_INFO is base64-encoded YAML in cimipkg builds since the
+    /// property-leak fix; older builds stored the raw multi-line YAML inline.
+    /// Try base64 first; if that fails, return the value as-is so legacy MSIs
+    /// still surface their build-info.
+    /// </summary>
+    private static string? DecodeBuildInfoYaml(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return value;
+
+        // Quick reject: a YAML doc always contains a colon and a newline; a
+        // base64 string never does. Base64 is also strictly limited to A-Z,
+        // a-z, 0-9, '+', '/', and '='.
+        if (value.Contains('\n') || value.Contains(':')) return value;
+
+        try
+        {
+            var bytes = Convert.FromBase64String(value);
+            return Encoding.UTF8.GetString(bytes);
+        }
+        catch (FormatException)
+        {
+            return value;
+        }
     }
 
     /// <summary>
