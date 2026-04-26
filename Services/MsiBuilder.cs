@@ -274,31 +274,52 @@ public class MsiBuilder
         // Cimian-specific properties
         SetProperty("CIMIAN_IDENTIFIER", identifier);
         SetProperty("CIMIAN_FULL_VERSION", fullVersion);
-        // NOTE: CIMIAN_PKG_BUILD_INFO used to embed the full build-info.yaml as a
-        // multi-line Property value. That was leaking its content into the next
-        // property at runtime (MSI Property table is a row-per-property store and
-        // the logger dumps them sequentially; multi-line values confused the dump
-        // AND caused PREVIOUSVERSIONSINSTALLED to resolve to the YAML blob at
-        // runtime, which broke every MSI condition that referenced it). The YAML
-        // is already embedded in the MSI as a streamed file if a script needs it;
-        // the property was never read by any install-time action.
-        // SetProperty("CIMIAN_PKG_BUILD_INFO", buildInfoYaml);
+        // CIMIAN_PKG_BUILD_INFO is the signal that downstream readers
+        // (MsiPropertyReader, MsiMetadata.IsCimianPackage) use to recognize a
+        // cimipkg-built MSI. It MUST stay present. Encode the YAML as base64 so
+        // the value is single-line: a multi-line Property value confuses MSI's
+        // verbose property dump (subsequent properties appear concatenated) and
+        // — far worse — caused PREVIOUSVERSIONSINSTALLED to resolve to the YAML
+        // blob at runtime, breaking every condition that referenced it.
+        // MsiPropertyReader.ReadMetadata transparently base64-decodes when it
+        // sees a value matching this shape; older readers will see an opaque
+        // string but IsCimianPackage stays true (non-empty value).
+        if (!string.IsNullOrEmpty(buildInfoYaml))
+        {
+            var encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(buildInfoYaml));
+            SetProperty("CIMIAN_PKG_BUILD_INFO", encoded);
+        }
 
         // SecureCustomProperties lets Windows Installer honor PREVIOUSVERSIONSINSTALLED
         // when it's populated by FindRelatedProducts during a major upgrade.
-        // (We deliberately do NOT pre-set PREVIOUSVERSIONSINSTALLED to an empty
+        // We deliberately do NOT pre-set PREVIOUSVERSIONSINSTALLED to an empty
         // default — WiX doesn't, and doing so makes the Property dump log lines
-        // collide with any adjacent multi-line property.)
-        SetProperty("SecureCustomProperties", "PREVIOUSVERSIONSINSTALLED");
-
-        // Custom MSI properties from build-info.yaml
+        // collide with any adjacent multi-line property.
+        // Apply user-supplied msi_properties FIRST so we can merge our required
+        // PREVIOUSVERSIONSINSTALLED value into any user-provided
+        // SecureCustomProperties instead of throwing on a duplicate insert.
+        var userSecureCustomProperties = string.Empty;
         if (buildInfo.MsiProperties != null)
         {
             foreach (var (key, value) in buildInfo.MsiProperties)
             {
+                if (string.Equals(key, "SecureCustomProperties", StringComparison.Ordinal))
+                {
+                    userSecureCustomProperties = value ?? string.Empty;
+                    continue;
+                }
                 SetProperty(key, value);
             }
         }
+
+        var secureCustomProperties = string.IsNullOrWhiteSpace(userSecureCustomProperties)
+            ? "PREVIOUSVERSIONSINSTALLED"
+            : userSecureCustomProperties
+                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Append("PREVIOUSVERSIONSINSTALLED")
+                .Distinct(StringComparer.Ordinal)
+                .Aggregate((a, b) => $"{a};{b}");
+        SetProperty("SecureCustomProperties", secureCustomProperties);
     }
 
     private static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
