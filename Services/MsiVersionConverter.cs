@@ -9,9 +9,14 @@ namespace Cimian.CLI.Cimipkg.Services;
 ///   minor: 0-255
 ///   build: 0-65535
 ///
-/// Date-based versions (YYYY.MM.DD.HHMM) are converted to (YY.MDD.HHMM)
-/// where YY = year - 2000, MDD = month * 100 + day.
-/// The full original version is preserved in CIMIAN_FULL_VERSION property.
+/// Date-based versions (YYYY.MM.DD or YYYY.MM.DD.HHMM) use YY = year - 2000.
+/// When month * 100 + day fits in the MSI minor field (≤ 255), the result is
+/// YY.(month * 100 + day).HHMM. When it exceeds 255 (most months past March),
+/// it falls back to YY.month.(day * 100 + HH); for example, 2026.04.05.1423
+/// becomes 26.4.514 and 2026.04.24.1640 becomes 26.4.2416. The minute
+/// component is dropped in this fallback to stay within the build field's
+/// 0–65535 range.
+/// The full original version is preserved in CIMIAN_PKG_FULL_VERSION property.
 /// </summary>
 public static partial class MsiVersionConverter
 {
