@@ -141,7 +141,7 @@ The default output format. Builds native Windows Installer packages via the DTF 
 
 ### Version handling
 
-MSI requires `major.minor.build` format (0-255, 0-255, 0-65535). Date-based versions are automatically converted: `2026.04.05.1423` becomes `26.4.51423`. The original version is preserved in the `CIMIAN_PKG_FULL_VERSION` MSI property.
+MSI requires `major.minor.build` format (0-255, 0-255, 0-65535). Date-based versions are automatically converted: `2026.04.05.1423` becomes `26.4.514` (when `month*100+day` exceeds 255 the minute component is dropped to stay within the build-field limit; otherwise the result is `YY.(month*100+day).HHMM`). The original version is preserved in the `CIMIAN_PKG_FULL_VERSION` MSI property.
 
 ## nupkg
 
