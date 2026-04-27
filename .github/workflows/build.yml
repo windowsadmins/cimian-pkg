@@ -72,9 +72,3 @@ jobs:
             --latest \
             release/cimipkg-win-x64.zip \
             release/cimipkg-win-arm64.zip
-
-      - name: Delete tag
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh api -X DELETE "repos/${{ github.repository }}/git/refs/tags/v${{ steps.version.outputs.version }}" || true
