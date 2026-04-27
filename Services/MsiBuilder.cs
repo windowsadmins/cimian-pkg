@@ -271,9 +271,9 @@ public class MsiBuilder
         if (!string.IsNullOrEmpty(buildInfo.Product.Url))
             SetProperty("ARPURLINFOABOUT", buildInfo.Product.Url);
 
-        // Cimian-specific properties
-        SetProperty("CIMIAN_IDENTIFIER", identifier);
-        SetProperty("CIMIAN_FULL_VERSION", fullVersion);
+        // Cimian-specific properties (all use CIMIAN_PKG_ prefix)
+        SetProperty("CIMIAN_PKG_IDENTIFIER", identifier);
+        SetProperty("CIMIAN_PKG_FULL_VERSION", fullVersion);
         // CIMIAN_PKG_BUILD_INFO is the signal that downstream readers
         // (MsiPropertyReader, MsiMetadata.IsCimianPackage) use to recognize a
         // cimipkg-built MSI. It MUST stay present. Encode the YAML as base64 so
