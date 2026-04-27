@@ -49,8 +49,8 @@ public class MsiPropertyReader
             // possible; fall back to the raw string for MSIs built before the
             // base64 change so older artifacts still expose their YAML.
             metadata.BuildInfoYaml = DecodeBuildInfoYaml(ReadProperty(db, "CIMIAN_PKG_BUILD_INFO"));
-            metadata.FullVersion = ReadProperty(db, "CIMIAN_FULL_VERSION") ?? metadata.ProductVersion;
-            metadata.Identifier = ReadProperty(db, "CIMIAN_IDENTIFIER") ?? string.Empty;
+            metadata.FullVersion = ReadProperty(db, "CIMIAN_PKG_FULL_VERSION") ?? metadata.ProductVersion;
+            metadata.Identifier = ReadProperty(db, "CIMIAN_PKG_IDENTIFIER") ?? string.Empty;
 
             // Try to determine architecture from Summary Information
             try

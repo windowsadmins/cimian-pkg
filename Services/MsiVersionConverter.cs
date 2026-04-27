@@ -11,7 +11,7 @@ namespace Cimian.CLI.Cimipkg.Services;
 ///
 /// Date-based versions (YYYY.MM.DD.HHMM) are converted to (YY.MDD.HHMM)
 /// where YY = year - 2000, MDD = month * 100 + day.
-/// The full original version is preserved in CIMIAN_FULL_VERSION property.
+/// The full original version is preserved in CIMIAN_PKG_FULL_VERSION property.
 /// </summary>
 public static partial class MsiVersionConverter
 {
