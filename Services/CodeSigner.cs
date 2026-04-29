@@ -313,20 +313,23 @@ public class CodeSigner
     }
 
     /// <summary>
-    /// Finds a signtool.exe whose machine type matches the host architecture.
-    /// Searches Windows SDK directories first (deterministic by arch), then
-    /// PATH as a fallback. Validates each candidate by reading its PE header
-    /// machine type — directory names like "x64" can lie on damaged installs,
-    /// and a stale "arm64\signtool.exe" prepended to PATH on an x64 host will
-    /// otherwise be picked silently and fail with "Machine Type Mismatch."
+    /// Finds a signtool.exe the host OS can execute. Searches Windows SDK
+    /// directories first (deterministic by arch), then PATH as a fallback.
+    /// Validates each candidate via its PE header machine type — directory
+    /// names like "x64" can lie on damaged installs, and a stale
+    /// "arm64\signtool.exe" prepended to PATH on an x64 host would otherwise
+    /// be picked silently and fail with "Machine Type Mismatch."
+    /// Uses OSArchitecture (not ProcessArchitecture): we only need the
+    /// host OS to be able to launch the resolved binary, not for it to
+    /// share an architecture with this specific cimipkg process.
     /// </summary>
     private static string FindSignTool()
     {
-        var hostArch = RuntimeInformation.ProcessArchitecture;
+        var osArch = RuntimeInformation.OSArchitecture;
 
-        // Architecture preference for the host. x64 hosts can fall back to x86;
-        // arm64 can emulate x64/x86; x86 stays x86 only.
-        var archPriority = hostArch switch
+        // Architecture preference for the host OS. x64 OS can launch x86;
+        // arm64 OS can emulate x64/x86; x86 OS can only launch x86.
+        var archPriority = osArch switch
         {
             Architecture.X64   => new[] { "x64", "x86" },
             Architecture.Arm64 => new[] { "arm64", "x64", "x86" },
@@ -353,38 +356,34 @@ public class CodeSigner
                 foreach (var arch in archPriority)
                 {
                     var candidate = Path.Combine(versionDir, arch, "signtool.exe");
-                    if (File.Exists(candidate) && PeMachineMatchesHost(candidate, hostArch))
+                    if (File.Exists(candidate) && PeMachineRunnableOn(candidate, osArch))
                         return candidate;
                 }
             }
         }
 
-        // Fallback: walk PATH but validate each match via PE header. This
-        // protects against a wrong-arch signtool ahead of the right one on
-        // PATH (e.g. a Developer Prompt prepending an arm64 dir on x64 hosts).
-        var pathVar = Environment.GetEnvironmentVariable("PATH");
-        if (!string.IsNullOrEmpty(pathVar))
-        {
-            foreach (var dir in pathVar.Split(Path.PathSeparator))
-            {
-                if (string.IsNullOrWhiteSpace(dir)) continue;
-                var candidate = Path.Combine(dir, "signtool.exe");
-                if (File.Exists(candidate) && PeMachineMatchesHost(candidate, hostArch))
-                    return candidate;
-            }
-        }
+        // Fallback: walk PATH but validate each match via PE header. Protects
+        // against a wrong-arch signtool ahead of the right one on PATH (e.g.
+        // a Developer Prompt prepending an arm64 dir on x64 hosts).
+        var pathSigntool = FindOnPath("signtool.exe", file => PeMachineRunnableOn(file, osArch));
+        if (pathSigntool != null) return pathSigntool;
 
         throw new FileNotFoundException(
-            "signtool.exe matching host architecture not found. " +
+            "signtool.exe runnable on this host's OS architecture not found. " +
             "Install a Windows 10/11 SDK that includes the Signing Tools for your platform.");
     }
 
     /// <summary>
     /// Reads the machine-type field from a PE file's COFF header and returns
-    /// true if it's runnable on the current host. Used to guard against
-    /// directory-name lies and stale PATH entries pointing at the wrong arch.
+    /// true if the host OS at <paramref name="osArch"/> can execute it.
+    /// Guards against directory-name lies and stale PATH entries.
     /// </summary>
-    private static bool PeMachineMatchesHost(string filePath, Architecture hostArch)
+    // TODO: add unit tests covering this method — write minimal PE fixtures
+    // (4-byte e_lfanew at 0x3C, "PE\0\0" signature, then the 2-byte machine
+    // type) for the 0x8664 / 0xAA64 / 0x014C cases plus malformed inputs,
+    // and assert PeMachineRunnableOn returns the expected result for each
+    // OSArchitecture value. The repo already has xUnit set up.
+    private static bool PeMachineRunnableOn(string filePath, Architecture osArch)
     {
         try
         {
@@ -402,7 +401,7 @@ public class CodeSigner
                 return false;
             var machine = br.ReadUInt16();
             // 0x8664 = AMD64, 0xAA64 = ARM64, 0x014C = I386
-            return hostArch switch
+            return osArch switch
             {
                 Architecture.X64   => machine is 0x8664 or 0x014C,
                 Architecture.Arm64 => machine is 0xAA64 or 0x8664 or 0x014C,
@@ -417,18 +416,20 @@ public class CodeSigner
     }
 
     /// <summary>
-    /// Finds an executable on the system PATH.
+    /// Walks $PATH and returns the first <paramref name="executable"/> match
+    /// for which <paramref name="predicate"/> returns true (or the first
+    /// match unconditionally if no predicate is supplied).
     /// </summary>
-    private static string? FindOnPath(string executable)
+    private static string? FindOnPath(string executable, Func<string, bool>? predicate = null)
     {
         var pathVar = Environment.GetEnvironmentVariable("PATH");
-        if (string.IsNullOrEmpty(pathVar))
-            return null;
+        if (string.IsNullOrEmpty(pathVar)) return null;
 
         foreach (var dir in pathVar.Split(Path.PathSeparator))
         {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
             var fullPath = Path.Combine(dir, executable);
-            if (File.Exists(fullPath))
+            if (File.Exists(fullPath) && (predicate?.Invoke(fullPath) ?? true))
                 return fullPath;
         }
 
