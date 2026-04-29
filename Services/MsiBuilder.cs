@@ -111,9 +111,17 @@ public class MsiBuilder
                 ? "[INSTALLDIR]"  // placeholder — actual path resolved at install time
                 : buildInfo.InstallLocation!.TrimEnd('\\', '/');
 
-
-            _logger.LogDebug("Writing upgrade table...");
-            WriteUpgradeTable(db, upgradeCode);
+            // No Upgrade table by design — cimipkg MSIs are stateless deployers, not
+            // managed products. Each MSI just runs preinstall → copies payload →
+            // runs postinstall, regardless of what's already on disk. Keeping
+            // FindRelatedProducts / RemoveExistingProducts (and their Upgrade row)
+            // turned every upgrade into a Windows Installer source-resolution dance
+            // that prompted for the previous MSI's installer file when the
+            // RemoveExistingProducts pass needed to revisit the old package — and
+            // failed silently when the bootstrap cache had rotated it away. The
+            // UpgradeCode property is still emitted in WriteProperties as metadata
+            // for downstream readers (managedsoftwareupdate / cimistatus); it just
+            // no longer drives any install-time behavior.
 
             if (payloadFiles.Length > 0)
             {
@@ -192,8 +200,9 @@ public class MsiBuilder
         // InstallExecuteSequence table
         db.Execute("CREATE TABLE `InstallExecuteSequence` (`Action` CHAR(72) NOT NULL, `Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)");
 
-        // Upgrade table
-        db.Execute("CREATE TABLE `Upgrade` (`UpgradeCode` CHAR(38) NOT NULL, `VersionMin` CHAR(20), `VersionMax` CHAR(20), `Language` CHAR(255), `Attributes` LONG NOT NULL, `Remove` CHAR(255), `ActionProperty` CHAR(72) NOT NULL PRIMARY KEY `UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`)");
+        // Upgrade table is intentionally NOT created. cimipkg MSIs do not
+        // participate in major-upgrade handling — see the comment in Build()
+        // for why.
     }
 
     private static void WriteSummaryInfo(string msiPath, string productName, string msiVersion, BuildInfo buildInfo)
@@ -237,7 +246,11 @@ public class MsiBuilder
             }
         }
 
-        // Standard MSI properties
+        // Standard MSI properties.
+        // UpgradeCode is set as metadata only — there is no Upgrade table, so it
+        // does not trigger FindRelatedProducts / RemoveExistingProducts. It is
+        // emitted because downstream readers (managedsoftwareupdate, cimistatus,
+        // ReportMate) read it via MsiPropertyReader for status correlation.
         SetProperty("ProductName", productName);
         SetProperty("ProductVersion", msiVersion);
         SetProperty("ProductCode", $"{{{productCode}}}");
@@ -290,36 +303,18 @@ public class MsiBuilder
             SetProperty("CIMIAN_PKG_BUILD_INFO", encoded);
         }
 
-        // SecureCustomProperties lets Windows Installer honor PREVIOUSVERSIONSINSTALLED
-        // when it's populated by FindRelatedProducts during a major upgrade.
-        // We deliberately do NOT pre-set PREVIOUSVERSIONSINSTALLED to an empty
-        // default — WiX doesn't, and doing so makes the Property dump log lines
-        // collide with any adjacent multi-line property.
-        // Apply user-supplied msi_properties FIRST so we can merge our required
-        // PREVIOUSVERSIONSINSTALLED value into any user-provided
-        // SecureCustomProperties instead of throwing on a duplicate insert.
-        var userSecureCustomProperties = string.Empty;
+        // User-supplied msi_properties from build-info.yaml. There is no longer
+        // any cimipkg-managed SecureCustomProperties / PREVIOUSVERSIONSINSTALLED
+        // merge to do — the Upgrade table is gone, so neither is populated at
+        // install time — but a user can still pass either through verbatim if
+        // their package needs it.
         if (buildInfo.MsiProperties != null)
         {
             foreach (var (key, value) in buildInfo.MsiProperties)
             {
-                if (string.Equals(key, "SecureCustomProperties", StringComparison.Ordinal))
-                {
-                    userSecureCustomProperties = value ?? string.Empty;
-                    continue;
-                }
                 SetProperty(key, value);
             }
         }
-
-        var secureCustomProperties = string.IsNullOrWhiteSpace(userSecureCustomProperties)
-            ? "PREVIOUSVERSIONSINSTALLED"
-            : userSecureCustomProperties
-                .Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                .Append("PREVIOUSVERSIONSINSTALLED")
-                .Distinct(StringComparer.Ordinal)
-                .Aggregate((a, b) => $"{a};{b}");
-        SetProperty("SecureCustomProperties", secureCustomProperties);
     }
 
     private static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
@@ -376,12 +371,6 @@ public class MsiBuilder
             db.Execute($"INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('{EscSql(dirId)}', '{EscSql(currentParent)}', '{EscSql(segments[i])}')");
             currentParent = dirId;
         }
-    }
-
-    private static void WriteUpgradeTable(Database db, Guid upgradeCode)
-    {
-        var uc = EscSql($"{{{upgradeCode}}}");
-        db.Execute($"INSERT INTO `Upgrade` (`UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty`) VALUES ('{uc}', '0.0.0', '', '', 256, '', 'PREVIOUSVERSIONSINSTALLED')");
     }
 
     private void WritePayloadTables(
@@ -542,32 +531,28 @@ public class MsiBuilder
             db.Execute($"INSERT INTO `InstallExecuteSequence` (`Action`, `Condition`, `Sequence`) VALUES ('{EscSql(action)}', '{EscSql(condition ?? "")}', {sequence})");
         }
 
-        // Full standard install sequence — all required actions for a working MSI
+        // Standard install sequence. FindRelatedProducts and RemoveExistingProducts
+        // are intentionally absent: cimipkg MSIs are stateless deployers and never
+        // try to remove a previously-installed product (see Build() for context).
         AddAction("LaunchConditions", null, 100);
-        AddAction("FindRelatedProducts", null, 200);
         AddAction("AppSearch", null, 400);
         AddAction("CostInitialize", null, 800);
         AddAction("FileCost", null, 900);
         AddAction("CostFinalize", null, 1000);
         AddAction("InstallValidate", null, 1400);
         AddAction("InstallInitialize", null, 1500);
-        AddAction("RemoveExistingProducts", null, 1525);
         AddAction("ProcessComponents", null, 1600);
         AddAction("UnpublishFeatures", null, 1800);
 
         if (hasScripts)
         {
-            // Preinstall fires only when a prior install is on the box — major upgrade
-            // (PREVIOUSVERSIONSINSTALLED is set by FindRelatedProducts via the Upgrade
-            // table) or a reinstall (REINSTALL is set by msiexec /fvomus or by the
-            // Windows Installer when the user re-runs the MSI over the same ProductCode).
-            // Fresh installs skip it entirely: there is nothing to "pre", which
-            // eliminates the SYSTEM-context pwsh.exe spawn that EDR flags on a
-            // first-time fleet rollout.
-            AddAction(
-                "CimianPreinstall",
-                "PREVIOUSVERSIONSINSTALLED OR REINSTALL",
-                1498);
+            // Preinstall fires on every install operation, skipped only on uninstall.
+            // The previous gating on PREVIOUSVERSIONSINSTALLED OR REINSTALL was a
+            // by-product of the upgrade machinery we no longer use; with the Upgrade
+            // table gone, the property is never populated and the script would
+            // never have run on the new build anyway. The contract is "preinstall
+            // always runs first when the package is being installed."
+            AddAction("CimianPreinstall", "NOT (REMOVE=\"ALL\")", 1498);
         }
 
         if (hasPayload)
@@ -584,17 +569,13 @@ public class MsiBuilder
 
         if (hasScripts)
         {
-            // Postinstall fires on fresh install AND upgrade new-install pass — anything
-            // that isn't a removal. File operations are complete at this point.
+            // Postinstall fires on every install operation, skipped only on uninstall.
             AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6601);
-            // Uninstall fires only on standalone uninstall, NOT on the upgrade-driven
-            // removal pass of the previous product (UPGRADINGPRODUCTCODE is set by
-            // Windows Installer during that pass). Running uninstall.ps1 during an
-            // upgrade would tear down state that postinstall.ps1 is about to re-create.
-            AddAction(
-                "CimianUninstall",
-                "(REMOVE=\"ALL\") AND NOT UPGRADINGPRODUCTCODE",
-                6602);
+            // Uninstall fires only on standalone uninstall. The previous
+            // UPGRADINGPRODUCTCODE guard existed to skip this CA during the
+            // RemoveExistingProducts pass of a major upgrade; without the upgrade
+            // machinery there is no such pass, so the guard is unnecessary.
+            AddAction("CimianUninstall", "REMOVE=\"ALL\"", 6602);
         }
     }
 
@@ -733,32 +714,26 @@ public class MsiBuilder
         var vbs = new StringBuilder(base64.Length + 4096);
         vbs.Append("On Error Resume Next\r\n");
         vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
-        vbs.Append("Dim cimianPhase, cimianRemove, cimianUpgrading, cimianPrevious\r\n");
+        vbs.Append("Dim cimianPhase, cimianRemove\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
         vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
         // surfaces the extraction dir - preinstall/postinstall scripts can read
         // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n");
-        // Compute install phase from standard MSI properties so scripts don't have to
-        // re-parse them. UPGRADINGPRODUCTCODE is set only on the previous-version
-        // removal pass of a major upgrade. PREVIOUSVERSIONSINSTALLED is populated by
-        // FindRelatedProducts (via the Upgrade table) during the new-version install
-        // pass of a major upgrade. Everything else is a fresh install.
+        // Phase is just install vs uninstall — cimipkg MSIs do not participate
+        // in major upgrades, so PREVIOUSVERSIONSINSTALLED / UPGRADINGPRODUCTCODE
+        // are never populated and the prior "upgrade"/"fresh" branches never
+        // fired meaningfully.
         vbs.Append("cimianRemove = Session.Property(\"REMOVE\")\r\n");
-        vbs.Append("cimianUpgrading = Session.Property(\"UPGRADINGPRODUCTCODE\")\r\n");
-        vbs.Append("cimianPrevious = Session.Property(\"PREVIOUSVERSIONSINSTALLED\")\r\n");
-        vbs.Append("If cimianRemove = \"ALL\" And Len(cimianUpgrading) = 0 Then\r\n");
+        vbs.Append("If cimianRemove = \"ALL\" Then\r\n");
         vbs.Append("  cimianPhase = \"uninstall\"\r\n");
-        vbs.Append("ElseIf Len(cimianPrevious) > 0 Or Len(Session.Property(\"Installed\")) > 0 Then\r\n");
-        vbs.Append("  cimianPhase = \"upgrade\"\r\n");
         vbs.Append("Else\r\n");
-        vbs.Append("  cimianPhase = \"fresh\"\r\n");
+        vbs.Append("  cimianPhase = \"install\"\r\n");
         vbs.Append("End If\r\n");
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PHASE\") = cimianPhase\r\n");
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_VERSION\") = Session.Property(\"ProductVersion\")\r\n");
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PREVIOUS_PRODUCT_CODE\") = cimianPrevious\r\n");
-        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & Session.Property(\"ProductVersion\") & \" previous=\" & cimianPrevious\r\n");
+        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & Session.Property(\"ProductVersion\")\r\n");
         //
         // Resolve the PowerShell runtime at install time so the same cimipkg MSI
         // works on endpoints with or without PowerShell 7 installed:
