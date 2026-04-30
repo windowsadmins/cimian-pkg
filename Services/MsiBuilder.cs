@@ -18,10 +18,10 @@ public class MsiBuilder
     private readonly ScriptProcessor _scriptProcessor;
     private readonly ISerializer _yamlSerializer;
 
-    // Standard MSI sequence numbers for InstallExecuteSequence
+    // Standard MSI sequence numbers for InstallExecuteSequence.
+    // FindRelatedProducts/RemoveExistingProducts are intentionally absent —
+    // cimipkg MSIs do not participate in major upgrades (see Build()).
     private const int SeqLaunchConditions = 100;
-    private const int SeqFindRelatedProducts = 200;
-    private const int SeqRemoveExistingProducts = 1525;
     private const int SeqPreinstallScript = 3900;
     private const int SeqInstallFiles = 4000;
     private const int SeqPostinstallScript = 4100;
@@ -171,7 +171,7 @@ public class MsiBuilder
         return msiPath;
     }
 
-    private static void CreateTables(Database db)
+    internal static void CreateTables(Database db)
     {
         // Property table
         db.Execute("CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` LONGCHAR LOCALIZABLE PRIMARY KEY `Property`)");
@@ -524,7 +524,7 @@ public class MsiBuilder
         db.Execute("INSERT INTO `FeatureComponents` (`Feature_`, `Component_`) VALUES ('DefaultFeature', 'C_CimianMarker')");
     }
 
-    private static void WriteInstallSequence(Database db, bool hasScripts, bool hasPayload)
+    internal static void WriteInstallSequence(Database db, bool hasScripts, bool hasPayload)
     {
         void AddAction(string action, string? condition, int sequence)
         {
