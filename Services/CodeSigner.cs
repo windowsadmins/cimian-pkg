@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -312,56 +313,118 @@ public class CodeSigner
     }
 
     /// <summary>
-    /// Finds signtool.exe in Windows SDK paths.
-    /// Searches common SDK installation directories for the signing tool.
+    /// Finds a signtool.exe the host OS can execute. Searches Windows SDK
+    /// directories first (deterministic by arch), then PATH as a fallback.
+    /// Validates each candidate via its PE header machine type — directory
+    /// names like "x64" can lie on damaged installs, and a stale
+    /// "arm64\signtool.exe" prepended to PATH on an x64 host would otherwise
+    /// be picked silently and fail with "Machine Type Mismatch."
+    /// Uses OSArchitecture (not ProcessArchitecture): we only need the
+    /// host OS to be able to launch the resolved binary, not for it to
+    /// share an architecture with this specific cimipkg process.
     /// </summary>
     private static string FindSignTool()
     {
-        // Check if signtool is on PATH first
-        var pathResult = FindOnPath("signtool.exe");
-        if (pathResult != null)
-            return pathResult;
+        var osArch = RuntimeInformation.OSArchitecture;
 
-        // Search Windows SDK directories
-        var programFilesX86 = Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86);
-        var sdkRoot = Path.Combine(programFilesX86, "Windows Kits", "10", "bin");
-
-        if (Directory.Exists(sdkRoot))
+        // Architecture preference for the host OS. x64 OS can launch x86;
+        // arm64 OS can emulate x64/x86; x86 OS can only launch x86.
+        var archPriority = osArch switch
         {
-            // Get version directories, sorted descending to prefer newest SDK
+            Architecture.X64   => new[] { "x64", "x86" },
+            Architecture.Arm64 => new[] { "arm64", "x64", "x86" },
+            Architecture.X86   => new[] { "x86" },
+            _                  => new[] { "x64", "x86" }
+        };
+
+        // Search Windows SDK \bin\<version>\<arch>\signtool.exe first.
+        var sdkRoots = new[]
+        {
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                         "Windows Kits", "10", "bin"),
+            Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                         "Windows Kits", "10", "bin")
+        };
+
+        foreach (var sdkRoot in sdkRoots.Where(Directory.Exists))
+        {
             var versionDirs = Directory.GetDirectories(sdkRoot, "10.*")
-                .OrderByDescending(d => d)
-                .ToArray();
+                .OrderByDescending(d => d);
 
             foreach (var versionDir in versionDirs)
             {
-                // Try x64 first, then x86
-                foreach (var arch in new[] { "x64", "x86" })
+                foreach (var arch in archPriority)
                 {
-                    var signtoolPath = Path.Combine(versionDir, arch, "signtool.exe");
-                    if (File.Exists(signtoolPath))
-                        return signtoolPath;
+                    var candidate = Path.Combine(versionDir, arch, "signtool.exe");
+                    if (File.Exists(candidate) && PeMachineRunnableOn(candidate, osArch))
+                        return candidate;
                 }
             }
         }
 
+        // Fallback: walk PATH but validate each match via PE header. Protects
+        // against a wrong-arch signtool ahead of the right one on PATH (e.g.
+        // a Developer Prompt prepending an arm64 dir on x64 hosts).
+        var pathSigntool = FindOnPath("signtool.exe", file => PeMachineRunnableOn(file, osArch));
+        if (pathSigntool != null) return pathSigntool;
+
         throw new FileNotFoundException(
-            "signtool.exe not found. Install a Windows 10/11 SDK or ensure signtool.exe is on PATH.");
+            "signtool.exe runnable on this host's OS architecture not found. " +
+            "Install a Windows 10/11 SDK that includes the Signing Tools for your platform.");
     }
 
     /// <summary>
-    /// Finds an executable on the system PATH.
+    /// Reads the machine-type field from a PE file's COFF header and returns
+    /// true if the host OS at <paramref name="osArch"/> can execute it.
+    /// Guards against directory-name lies and stale PATH entries.
     /// </summary>
-    private static string? FindOnPath(string executable)
+    internal static bool PeMachineRunnableOn(string filePath, Architecture osArch)
+    {
+        try
+        {
+            using var fs = File.OpenRead(filePath);
+            using var br = new BinaryReader(fs);
+            // PE files: 4-byte int at offset 0x3C points to the PE header.
+            if (fs.Length < 0x40) return false;
+            fs.Seek(0x3C, SeekOrigin.Begin);
+            var peOffset = br.ReadInt32();
+            if (peOffset < 0 || fs.Length < peOffset + 6) return false;
+            fs.Seek(peOffset, SeekOrigin.Begin);
+            // PE signature: "PE\0\0"
+            if (br.ReadByte() != 0x50 || br.ReadByte() != 0x45 ||
+                br.ReadByte() != 0x00 || br.ReadByte() != 0x00)
+                return false;
+            var machine = br.ReadUInt16();
+            // 0x8664 = AMD64, 0xAA64 = ARM64, 0x014C = I386
+            return osArch switch
+            {
+                Architecture.X64   => machine is 0x8664 or 0x014C,
+                Architecture.Arm64 => machine is 0xAA64 or 0x8664 or 0x014C,
+                Architecture.X86   => machine is 0x014C,
+                _                  => false
+            };
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Walks $PATH and returns the first <paramref name="executable"/> match
+    /// for which <paramref name="predicate"/> returns true (or the first
+    /// match unconditionally if no predicate is supplied).
+    /// </summary>
+    private static string? FindOnPath(string executable, Func<string, bool>? predicate = null)
     {
         var pathVar = Environment.GetEnvironmentVariable("PATH");
-        if (string.IsNullOrEmpty(pathVar))
-            return null;
+        if (string.IsNullOrEmpty(pathVar)) return null;
 
         foreach (var dir in pathVar.Split(Path.PathSeparator))
         {
+            if (string.IsNullOrWhiteSpace(dir)) continue;
             var fullPath = Path.Combine(dir, executable);
-            if (File.Exists(fullPath))
+            if (File.Exists(fullPath) && (predicate?.Invoke(fullPath) ?? true))
                 return fullPath;
         }
 

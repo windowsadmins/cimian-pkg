@@ -18,4 +18,8 @@
     <Compile Remove="tests\**" />
   </ItemGroup>
 
+  <ItemGroup>
+    <InternalsVisibleTo Include="Cimian.Cimipkg.Tests" />
+  </ItemGroup>
+
 </Project>
