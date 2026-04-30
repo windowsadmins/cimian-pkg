@@ -378,12 +378,7 @@ public class CodeSigner
     /// true if the host OS at <paramref name="osArch"/> can execute it.
     /// Guards against directory-name lies and stale PATH entries.
     /// </summary>
-    // TODO: add unit tests covering this method — write minimal PE fixtures
-    // (4-byte e_lfanew at 0x3C, "PE\0\0" signature, then the 2-byte machine
-    // type) for the 0x8664 / 0xAA64 / 0x014C cases plus malformed inputs,
-    // and assert PeMachineRunnableOn returns the expected result for each
-    // OSArchitecture value. The repo already has xUnit set up.
-    private static bool PeMachineRunnableOn(string filePath, Architecture osArch)
+    internal static bool PeMachineRunnableOn(string filePath, Architecture osArch)
     {
         try
         {
