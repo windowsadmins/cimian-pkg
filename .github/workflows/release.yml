@@ -1,0 +1,133 @@
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  DOTNET_VERSION: '10.0.x'
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [win-x64, win-arm64]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+          dotnet-quality: preview
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: ~\.nuget\packages
+          key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props', '**/Directory.Packages.props') }}
+
+      - name: Derive version from tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $version = $tag -replace '^v',''
+          "version=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Restore
+        run: dotnet restore
+
+      - name: Publish ${{ matrix.arch }}
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          dotnet publish Cimian.CLI.cimipkg.csproj `
+            -c Release -r ${{ matrix.arch }} --self-contained `
+            -o publish `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:Version=$version `
+            -p:AssemblyVersion=$version `
+            -p:FileVersion=$version `
+            -p:InformationalVersion=$version
+
+      - name: Stage artifacts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path staging -Force | Out-Null
+          if (-not (Test-Path "publish/cimipkg.exe")) { throw "cimipkg.exe not found in publish/" }
+          Compress-Archive -Path publish/cimipkg.exe -DestinationPath "staging/cimipkg-${{ matrix.arch }}.zip" -Force
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cimipkg-${{ matrix.arch }}
+          path: staging/cimipkg-${{ matrix.arch }}.zip
+          retention-days: 14
+
+  release:
+    name: Create Release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Derive version from tag
+        id: version
+        run: |
+          tag="${{ github.ref_name }}"
+          version="${tag#v}"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="${{ github.ref_name }}"
+          version="${{ steps.version.outputs.version }}"
+          run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+
+          notes_body=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$tag" --jq .body)
+
+          notes=$(cat <<EOF
+          ## Build info
+
+          Built via GitHub Actions: $run_url. Provided **unsigned**.
+
+          $notes_body
+
+          ## Signing for enterprise deployment
+
+          \`\`\`powershell
+          Expand-Archive -Path cimipkg-win-x64.zip -DestinationPath .
+          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /n "Your Certificate Name" cimipkg.exe
+          \`\`\`
+
+          Built from commit \`$GITHUB_SHA\`.
+          EOF
+          )
+
+          gh release create "$tag" \
+            --title "cimipkg $version" \
+            --notes "$notes" \
+            --latest \
+            artifacts/cimipkg-win-x64.zip \
+            artifacts/cimipkg-win-arm64.zip
