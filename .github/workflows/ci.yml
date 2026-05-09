@@ -40,10 +40,12 @@ jobs:
             nuget-${{ runner.os }}-
 
       - name: Restore
-        run: dotnet restore
+        run: |
+          dotnet restore Cimian.CLI.cimipkg.csproj
+          dotnet restore tests/Cimian.Cimipkg.Tests.csproj
 
       - name: Build
-        run: dotnet build -c Release --no-restore --verbosity minimal
+        run: dotnet build Cimian.CLI.cimipkg.csproj -c Release --no-restore --verbosity minimal
 
       - name: Test
         run: dotnet test tests/Cimian.Cimipkg.Tests.csproj -c Release --no-restore --logger "trx;LogFileName=test-results.trx" --results-directory ./TestResults
