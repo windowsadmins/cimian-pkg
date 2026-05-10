@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Linq;
 using System.Text;
 using Cimian.CLI.Cimipkg.Services;
@@ -231,5 +232,176 @@ public class MsiBuilderTests
             sb.Append(line);
         }
         return sb.ToString();
+    }
+
+    // =========================================================================
+    // Cabinet planner tests — guard the multi-CAB split that lets cimipkg ship
+    // payloads larger than makecab.exe's ~2 GB single-cabinet ceiling.
+    //
+    // Regression context: a cimipkg user reported Unreal Engine 5.6.1 (~25.6 GB
+    // payload) failing to build because makecab tops out near 2 GB per cabinet.
+    // The fix splits the payload into N cabinets via the standard MSI Media
+    // table layout. These tests pin the planner's chunking semantics so the
+    // small-payload case stays byte-identical to single-CAB output and the
+    // large-payload case rolls over correctly at the threshold.
+    // =========================================================================
+
+    [Fact]
+    public void PlanCabinetSegments_EmptyPayload_ReturnsZeroSegments()
+    {
+        using var tmp = new TempDir();
+        var plan = MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "test.identifier");
+        Assert.Empty(plan);
+    }
+
+    [Fact]
+    public void PlanCabinetSegments_SmallPayload_FitsInOneCabinet_KeepsLegacyName()
+    {
+        // Single-cabinet payloads MUST keep the historical "product.cab" name
+        // so external diagnostic tooling (wix decompile, lessmsi, etc.) that
+        // recognizes that name keeps working — and so the byte-level diff
+        // between this commit and the previous cimipkg release stays minimal
+        // for the common case.
+        using var tmp = new TempDir();
+        var files = new[]
+        {
+            tmp.WriteFile("a.txt", 100),
+            tmp.WriteFile("sub/b.txt", 200),
+            tmp.WriteFile("c.bin", 300),
+        };
+
+        var plan = MsiBuilder.PlanCabinetSegments(tmp.Path, files, "test.identifier");
+
+        Assert.Single(plan);
+        Assert.Equal(1, plan[0].DiskId);
+        Assert.Equal("product.cab", plan[0].CabinetName);
+        Assert.Equal(3, plan[0].Files.Count);
+        Assert.Equal(new[] { 1, 2, 3 }, plan[0].Files.Select(f => f.Sequence));
+    }
+
+    [Fact]
+    public void PlanCabinetSegments_PayloadExceedsThreshold_RollsOverAtBoundary()
+    {
+        // 5 files × 400 bytes each = 2000 bytes total. Threshold = 1000 bytes.
+        // Expected layout: cabinet 1 = files 1-2 (800 bytes), cabinet 2 =
+        // files 3-4 (800 bytes), cabinet 3 = file 5 (400 bytes).
+        using var tmp = new TempDir();
+        var files = Enumerable.Range(1, 5)
+            .Select(i => tmp.WriteFile($"f{i}.bin", 400))
+            .ToArray();
+
+        var plan = MsiBuilder.PlanCabinetSegments(tmp.Path, files, "test.identifier",
+            maxBytesPerCabinet: 1000);
+
+        Assert.Equal(3, plan.Count);
+        Assert.Equal(2, plan[0].Files.Count);
+        Assert.Equal(2, plan[1].Files.Count);
+        Assert.Single(plan[2].Files);
+
+        // DiskIds are 1-based and contiguous.
+        Assert.Equal(new[] { 1, 2, 3 }, plan.Select(s => s.DiskId));
+        // Cabinet names use product{N}.cab when there's more than one segment.
+        Assert.Equal(new[] { "product1.cab", "product2.cab", "product3.cab" },
+            plan.Select(s => s.CabinetName));
+        // File.Sequence values are contiguous 1..N across the entire payload —
+        // not reset per cabinet. This is required for MSI's Media.LastSequence
+        // ranges to correctly identify which cabinet each file lives in.
+        var allSequences = plan.SelectMany(s => s.Files).Select(f => f.Sequence).ToArray();
+        Assert.Equal(new[] { 1, 2, 3, 4, 5 }, allSequences);
+    }
+
+    [Fact]
+    public void PlanCabinetSegments_SingleFileLargerThanThreshold_GetsItsOwnCabinet()
+    {
+        // A single file larger than the threshold MUST still land in a cabinet
+        // (we don't reject it). makecab will fail informatively if the resulting
+        // CAB exceeds the format's hard ~2 GB limit, and the operator can split
+        // that file at the source. Refusing the file at the planner level would
+        // hide what's actually wrong.
+        using var tmp = new TempDir();
+        var files = new[]
+        {
+            tmp.WriteFile("normal.txt", 50),
+            tmp.WriteFile("huge.bin", 5000),     // bigger than threshold
+            tmp.WriteFile("after.txt", 50),
+        };
+
+        var plan = MsiBuilder.PlanCabinetSegments(tmp.Path, files, "test.identifier",
+            maxBytesPerCabinet: 1000);
+
+        Assert.Equal(3, plan.Count);
+        Assert.Single(plan[0].Files);                       // normal.txt
+        Assert.Equal("normal.txt", plan[0].Files[0].RelativePath);
+        Assert.Single(plan[1].Files);                       // huge.bin alone
+        Assert.Equal("huge.bin", plan[1].Files[0].RelativePath);
+        Assert.Single(plan[2].Files);                       // after.txt
+        Assert.Equal("after.txt", plan[2].Files[0].RelativePath);
+    }
+
+    [Fact]
+    public void PlanCabinetSegments_FileKeysMatchAcrossSegments()
+    {
+        // Both WritePayloadTables (Media/File rows) and EmbedPayloadCabs (CAB
+        // contents) consume this same plan. If FileKey derivation drifts between
+        // those two consumers, the File table would point at one key while the
+        // CAB contains another — install would fail with "file not found in
+        // cabinet". Keys MUST be deterministic per (relative path, identifier).
+        using var tmp = new TempDir();
+        var files = new[]
+        {
+            tmp.WriteFile("alpha/one.txt", 10),
+            tmp.WriteFile("beta/two.bin", 20),
+        };
+
+        var planA = MsiBuilder.PlanCabinetSegments(tmp.Path, files, "test.identifier");
+        var planB = MsiBuilder.PlanCabinetSegments(tmp.Path, files, "test.identifier");
+
+        var keysA = planA.SelectMany(s => s.Files).Select(f => f.FileKey).ToArray();
+        var keysB = planB.SelectMany(s => s.Files).Select(f => f.FileKey).ToArray();
+        Assert.Equal(keysA, keysB);
+        // Sanity: ComponentKey + ComponentId are also deterministic.
+        var compA = planA.SelectMany(s => s.Files).Select(f => f.ComponentId).ToArray();
+        var compB = planB.SelectMany(s => s.Files).Select(f => f.ComponentId).ToArray();
+        Assert.Equal(compA, compB);
+    }
+
+    [Fact]
+    public void PlanCabinetSegments_RejectsNonPositiveThreshold()
+    {
+        using var tmp = new TempDir();
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "id", maxBytesPerCabinet: 0));
+        Assert.Throws<ArgumentOutOfRangeException>(
+            () => MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "id", maxBytesPerCabinet: -1));
+    }
+
+    /// <summary>
+    /// Disposable scratch directory for planner tests that need real files on
+    /// disk (the planner calls FileInfo.Length which requires an actual file).
+    /// </summary>
+    private sealed class TempDir : IDisposable
+    {
+        public string Path { get; }
+        public TempDir()
+        {
+            Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(),
+                $"cimipkg-planner-test-{Guid.NewGuid():N}");
+            Directory.CreateDirectory(Path);
+        }
+        public string WriteFile(string relativePath, int sizeBytes)
+        {
+            var full = System.IO.Path.Combine(Path, relativePath.Replace('/', System.IO.Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(System.IO.Path.GetDirectoryName(full)!);
+            // Random content keeps tests honest if any future planner check were
+            // to look at content (it currently only looks at length).
+            var bytes = new byte[sizeBytes];
+            new Random(relativePath.GetHashCode()).NextBytes(bytes);
+            File.WriteAllBytes(full, bytes);
+            return full;
+        }
+        public void Dispose()
+        {
+            try { Directory.Delete(Path, recursive: true); } catch { /* best effort */ }
+        }
     }
 }
