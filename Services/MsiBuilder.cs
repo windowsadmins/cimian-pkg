@@ -552,7 +552,18 @@ public class MsiBuilder
             // table gone, the property is never populated and the script would
             // never have run on the new build anyway. The contract is "preinstall
             // always runs first when the package is being installed."
-            AddAction("CimianPreinstall", "NOT (REMOVE=\"ALL\")", 1498);
+            //
+            // Sequence 1398 places this BEFORE InstallValidate (1400). Why it must
+            // run before InstallValidate, not just before InstallInitialize: when
+            // the package being installed contains an .exe that's currently held
+            // open by a running service (e.g. cimiwatcher.exe), InstallValidate
+            // detects the lock and tries to display a Files-In-Use dialog. With
+            // MSIRESTARTMANAGERCONTROL=Disable and a service that has no window,
+            // there's no dialog to show and no window to find — InstallValidate
+            // sits in a ~110-second timeout before falling through. Running the
+            // preinstall script (which stops the service) before sequence 1400
+            // means InstallValidate sees nothing locked and proceeds immediately.
+            AddAction("CimianPreinstall", "NOT (REMOVE=\"ALL\")", 1398);
         }
 
         if (hasPayload)
