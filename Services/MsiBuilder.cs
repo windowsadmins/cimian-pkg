@@ -27,6 +27,130 @@ public class MsiBuilder
     private const int SeqPostinstallScript = 4100;
     private const int SeqInstallFinalize = 6600;
 
+    /// <summary>
+    /// Soft cap on the input bytes packed into a single embedded CAB stream.
+    /// makecab.exe (and the underlying CAB format) tops out near 2 GB per
+    /// cabinet; we hold ~500 MB of headroom both for compression overhead and
+    /// to keep individual file extraction times sane. Payloads larger than
+    /// this threshold are split across multiple cabinets via the standard MSI
+    /// Media-row-per-cabinet pattern (the same model used by Office, Visual
+    /// Studio, the Windows SDK, etc.).
+    ///
+    /// A single source file larger than the threshold still gets its own
+    /// cabinet — we don't reject it. makecab will fail informatively if the
+    /// resulting cabinet exceeds the format's hard limit, and the operator
+    /// can split that file at the source.
+    /// </summary>
+    internal const long DefaultMaxBytesPerCabinet = 1_500_000_000L;
+
+    /// <summary>
+    /// Plan describing how a payload is sliced into one or more cabinets.
+    /// Produced by <see cref="PlanCabinetSegments"/> and consumed by both
+    /// <see cref="WritePayloadTables"/> (for Media/File rows) and
+    /// <see cref="EmbedPayloadCabs"/> (for makecab invocation + stream
+    /// embedding). Both consumers MUST agree on file→cabinet placement and
+    /// sequence numbers, so they share this plan rather than independently
+    /// re-deriving it.
+    /// </summary>
+    internal sealed record PayloadFile(
+        string SourcePath,
+        string RelativePath,
+        string FileKey,
+        string ComponentKey,
+        Guid ComponentId,
+        int Sequence,
+        long Bytes);
+
+    internal sealed record CabinetSegment(
+        int DiskId,
+        string CabinetName,
+        IReadOnlyList<PayloadFile> Files);
+
+    /// <summary>
+    /// Group payload files into cabinet segments such that each segment's
+    /// total uncompressed input bytes stays below <paramref name="maxBytesPerCabinet"/>.
+    /// File order is preserved (matches caller's input order), and File.Sequence
+    /// values are assigned 1..N contiguously across the entire payload.
+    ///
+    /// When the resulting plan contains exactly one segment, its CabinetName
+    /// is "product.cab" — preserving the historical name for single-cabinet
+    /// MSIs so external diagnostic tooling that recognizes that name keeps
+    /// working. Multi-cabinet payloads use "product1.cab", "product2.cab", ...
+    /// </summary>
+    internal static IReadOnlyList<CabinetSegment> PlanCabinetSegments(
+        string payloadDir,
+        IReadOnlyList<string> payloadFiles,
+        string identifier,
+        long maxBytesPerCabinet = DefaultMaxBytesPerCabinet)
+    {
+        ArgumentNullException.ThrowIfNull(payloadDir);
+        ArgumentNullException.ThrowIfNull(payloadFiles);
+        ArgumentNullException.ThrowIfNull(identifier);
+        if (maxBytesPerCabinet <= 0)
+            throw new ArgumentOutOfRangeException(nameof(maxBytesPerCabinet), "must be positive");
+
+        var segments = new List<CabinetSegment>();
+        var currentFiles = new List<PayloadFile>();
+        long currentBytes = 0;
+        int sequence = 1;
+        int diskId = 1;
+
+        void Flush()
+        {
+            if (currentFiles.Count == 0) return;
+            segments.Add(new CabinetSegment(
+                DiskId: diskId,
+                CabinetName: $"product{diskId}.cab",
+                Files: currentFiles));
+            currentFiles = new List<PayloadFile>();
+            currentBytes = 0;
+            diskId++;
+        }
+
+        foreach (var filePath in payloadFiles)
+        {
+            var size = new FileInfo(filePath).Length;
+            var rel = Path.GetRelativePath(payloadDir, filePath).Replace('\\', '/');
+            var componentId = UpgradeCodeGenerator.GenerateComponentId(identifier, rel);
+
+            // 72-char MSI identifier limit. The GUID-N form is 34 chars and
+            // safely under 72 — no substring needed (substring would also throw
+            // on a 34-char input).
+            var fileKey = $"F_{SanitizeIdentifier(rel)}";
+            if (fileKey.Length > 72) fileKey = $"F_{componentId:N}";
+            var componentKey = $"C_{SanitizeIdentifier(rel)}";
+            if (componentKey.Length > 72) componentKey = $"C_{componentId:N}";
+
+            // Roll over to next cabinet if adding this file would overflow.
+            // A single file larger than the threshold will still land in its
+            // own (oversize) segment because the empty-segment check skips
+            // the rollover when there's nothing to flush.
+            if (currentFiles.Count > 0 && currentBytes + size > maxBytesPerCabinet)
+                Flush();
+
+            currentFiles.Add(new PayloadFile(
+                SourcePath: filePath,
+                RelativePath: rel,
+                FileKey: fileKey,
+                ComponentKey: componentKey,
+                ComponentId: componentId,
+                Sequence: sequence,
+                Bytes: size));
+            currentBytes += size;
+            sequence++;
+        }
+        Flush();
+
+        // Single-cabinet payloads keep the legacy "product.cab" name so the
+        // common case stays byte-identical to pre-multicab cimipkg output.
+        if (segments.Count == 1)
+        {
+            segments[0] = segments[0] with { CabinetName = "product.cab" };
+        }
+
+        return segments;
+    }
+
     public MsiBuilder(
         ILogger logger,
         CodeSigner codeSigner,
@@ -91,6 +215,12 @@ public class MsiBuilder
 
         _logger.LogInformation("Creating MSI: {MsiPath}", msiPath);
 
+        // Cabinet plan is computed inside the using block (it needs the MSI tables
+        // open) but consumed after the database is committed (cabinets are
+        // embedded as streams in a second pass). Hoisted here so it survives the
+        // scope.
+        IReadOnlyList<CabinetSegment> cabPlan = Array.Empty<CabinetSegment>();
+
         // Create the MSI database
         using (var db = new Database(msiPath, DatabaseOpenMode.Create))
         {
@@ -123,10 +253,17 @@ public class MsiBuilder
             // for downstream readers (managedsoftwareupdate / cimistatus); it just
             // no longer drives any install-time behavior.
 
+            // Plan the cabinet layout once; both WritePayloadTables (Media/File
+            // rows) and EmbedPayloadCabs (makecab + stream embedding) consume
+            // the same plan so file→cabinet placement and sequence numbers
+            // stay in lockstep.
             if (payloadFiles.Length > 0)
             {
-                _logger.LogDebug("Writing payload tables ({Count} files)...", payloadFiles.Length);
-                WritePayloadTables(db, payloadDir, payloadFiles, identifier, msiVersion);
+                cabPlan = PlanCabinetSegments(payloadDir, payloadFiles, identifier);
+                _logger.LogDebug(
+                    "Writing payload tables ({Files} files across {Cabs} cabinet(s))...",
+                    payloadFiles.Length, cabPlan.Count);
+                WritePayloadTables(db, cabPlan, msiVersion);
             }
             else
             {
@@ -149,11 +286,15 @@ public class MsiBuilder
         // Write Summary Information Stream after database is closed
         WriteSummaryInfo(msiPath, productName, msiVersion, buildInfo);
 
-        // Embed payload files as a CAB archive inside the MSI
-        if (payloadFiles.Length > 0)
+        // Embed each cabinet as a stream inside the MSI. For payloads larger
+        // than ~1.5 GB this produces multiple cabinets (product1.cab,
+        // product2.cab, ...) — see PlanCabinetSegments.
+        if (cabPlan.Count > 0)
         {
-            _logger.LogInformation("Creating and embedding CAB archive ({Count} files)...", payloadFiles.Length);
-            EmbedPayloadCab(msiPath, payloadDir, payloadFiles, identifier);
+            _logger.LogInformation(
+                "Creating and embedding {Cabs} CAB archive(s) ({Files} files)...",
+                cabPlan.Count, payloadFiles.Length);
+            EmbedPayloadCabs(msiPath, cabPlan);
         }
 
         _logger.LogInformation("MSI database created successfully");
@@ -375,13 +516,18 @@ public class MsiBuilder
 
     private void WritePayloadTables(
         Database db,
-        string payloadDir,
-        string[] payloadFiles,
-        string identifier,
+        IReadOnlyList<CabinetSegment> segments,
         string msiVersion)
     {
-        // Single media entry with embedded CAB (#product.cab = embedded stream)
-        db.Execute($"INSERT INTO `Media` (`DiskId`, `LastSequence`, `DiskPrompt`, `Cabinet`, `VolumeLabel`, `Source`) VALUES (1, {payloadFiles.Length}, '', '#product.cab', '', '')");
+        // One Media row per cabinet. LastSequence is the highest File.Sequence
+        // value contained in that cabinet — MSI uses these ranges to know which
+        // cabinet to crack open when extracting a given file. The '#' prefix on
+        // Cabinet marks it as an embedded stream (vs an external file sibling).
+        foreach (var seg in segments)
+        {
+            var lastSeq = seg.Files[^1].Sequence;
+            db.Execute($"INSERT INTO `Media` (`DiskId`, `LastSequence`, `DiskPrompt`, `Cabinet`, `VolumeLabel`, `Source`) VALUES ({seg.DiskId}, {lastSeq}, '', '#{EscSql(seg.CabinetName)}', '', '')");
+        }
 
         // Single feature
         db.Execute(
@@ -398,25 +544,17 @@ public class MsiBuilder
             [string.Empty] = "INSTALLDIR",
         };
 
-        int sequence = 1;
-        foreach (var filePath in payloadFiles)
+        foreach (var seg in segments)
+        foreach (var pf in seg.Files)
         {
-            var relativePath = Path.GetRelativePath(payloadDir, filePath).Replace('\\', '/');
+            var relativePath = pf.RelativePath;
+            var filePath = pf.SourcePath;
             var fileName = Path.GetFileName(filePath);
-            var fileSize = new FileInfo(filePath).Length;
-
-            // Generate deterministic component ID
-            var componentId = UpgradeCodeGenerator.GenerateComponentId(identifier, relativePath);
-            var componentKey = $"C_{SanitizeIdentifier(relativePath)}";
-            var fileKey = $"F_{SanitizeIdentifier(relativePath)}";
-
-            // Ensure keys fit within 72-char MSI limit. The GUID-N form is 34 chars, which is
-            // already safely below 72 — no substring needed (and substring would throw on a
-            // 34-char input).
-            if (componentKey.Length > 72)
-                componentKey = $"C_{componentId:N}";
-            if (fileKey.Length > 72)
-                fileKey = $"F_{componentId:N}";
+            var fileSize = pf.Bytes;
+            var fileKey = pf.FileKey;
+            var componentKey = pf.ComponentKey;
+            var componentId = pf.ComponentId;
+            var sequence = pf.Sequence;
 
             // Walk the relative path's parent segments, creating nested Directory rows on
             // demand. Returns the Directory identifier to use as Component.Directory_.
@@ -493,9 +631,8 @@ public class MsiBuilder
             // FeatureComponents
             db.Execute($"INSERT INTO `FeatureComponents` (`Feature_`, `Component_`) VALUES ('DefaultFeature', '{EscSql(componentKey)}')");
 
-
-            _logger.LogDebug("Added file: {RelativePath} ({Size} bytes)", relativePath, fileSize);
-            sequence++;
+            _logger.LogDebug("Added file: {RelativePath} ({Size} bytes, cabinet {Cabinet})",
+                relativePath, fileSize, seg.CabinetName);
         }
     }
 
@@ -901,122 +1038,134 @@ public class MsiBuilder
     }
 
     /// <summary>
-    /// Sanitize a path into a valid MSI identifier.
+    /// Build one CAB per cabinet segment via makecab.exe, then embed each CAB
+    /// as a named stream inside the MSI (stream name == cabinet name, matching
+    /// the Media table rows written by <see cref="WritePayloadTables"/>).
+    /// File-key naming inside each CAB must match the File table keys
+    /// (e.g., "F_hello_txt") — both come from <see cref="PlanCabinetSegments"/>
+    /// so they cannot drift.
     /// </summary>
-    /// <summary>
-    /// Create a CAB file from payload files and embed it inside the MSI as a stream.
-    /// The CAB file names must match the File table keys (e.g., F_hello_txt).
-    /// </summary>
-    private void EmbedPayloadCab(string msiPath, string payloadDir, string[] payloadFiles, string identifier)
+    private void EmbedPayloadCabs(string msiPath, IReadOnlyList<CabinetSegment> segments)
     {
+        if (segments.Count == 0) return;
+
         var tempDir = Path.Combine(Path.GetTempPath(), $"cimipkg_cab_{Guid.NewGuid():N}");
         Directory.CreateDirectory(tempDir);
 
         try
         {
-            var cabPath = Path.Combine(tempDir, "product.cab");
-
-            // Build a mapping of File table keys to actual file paths
-            // Must match what WritePayloadTables generated
-            var fileMapping = new List<(string FileKey, string SourcePath)>();
-            int sequence = 1;
-            foreach (var filePath in payloadFiles)
+            // Step 1: build each cabinet via its own makecab invocation.
+            // Each segment gets its own DDF + makecab run so cabinets are
+            // independent (no cross-cabinet file spanning) — this is the
+            // standard MSI multi-disk layout used by Office, Visual Studio,
+            // the Windows SDK, etc.
+            foreach (var seg in segments)
             {
-                var relativePath = Path.GetRelativePath(payloadDir, filePath).Replace('\\', '/');
-                var fileKey = $"F_{SanitizeIdentifier(relativePath)}";
-
-                // Match the truncation logic from WritePayloadTables — must use the
-                // same identifier so the deterministic componentId matches, otherwise
-                // File.File points at one key while the CAB contains another.
-                var componentId = UpgradeCodeGenerator.GenerateComponentId(identifier, relativePath);
-                if (fileKey.Length > 72)
-                    fileKey = $"F_{componentId:N}";
-
-                fileMapping.Add((fileKey, filePath));
-                sequence++;
+                BuildOneCabinet(tempDir, seg);
             }
 
-            // Create DDF (Diamond Directive File) for makecab
-            var ddfPath = Path.Combine(tempDir, "product.ddf");
-            var ddfContent = new StringBuilder();
-            ddfContent.AppendLine(".OPTION EXPLICIT");
-            ddfContent.AppendLine($".Set CabinetNameTemplate=product.cab");
-            ddfContent.AppendLine($".Set DiskDirectoryTemplate={tempDir}");
-            ddfContent.AppendLine(".Set Cabinet=on");
-            ddfContent.AppendLine(".Set Compress=on");
-            ddfContent.AppendLine(".Set CompressionType=MSZIP");
-            ddfContent.AppendLine(".Set MaxDiskSize=0");
-            ddfContent.AppendLine(".Set RptFileName=nul");
-            ddfContent.AppendLine(".Set InfFileName=nul");
-            ddfContent.AppendLine(".Set UniqueFiles=off");
-
-            foreach (var (fileKey, sourcePath) in fileMapping)
-            {
-                // makecab syntax: "sourcePath" "destinationNameInCab"
-                ddfContent.AppendLine($"\"{sourcePath}\" \"{fileKey}\"");
-            }
-
-            File.WriteAllText(ddfPath, ddfContent.ToString());
-
-            // Run makecab
-            var psi = new ProcessStartInfo
-            {
-                FileName = "makecab.exe",
-                Arguments = $"/F \"{ddfPath}\"",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true,
-                WorkingDirectory = tempDir
-            };
-
-            using var process = Process.Start(psi)!;
-            // Read both streams concurrently to avoid a deadlock: synchronous ReadToEnd
-            // on stdout blocks until the pipe is closed, but if makecab fills its stderr
-            // pipe buffer first it blocks waiting to write, and the process never exits.
-            // This reliably bit large payloads (~600+ files / ~160 MB CAB) on arm64.
-            var stdoutTask = process.StandardOutput.ReadToEndAsync();
-            var stderrTask = process.StandardError.ReadToEndAsync();
-            process.WaitForExit();
-            var output = stdoutTask.GetAwaiter().GetResult();
-            var error = stderrTask.GetAwaiter().GetResult();
-
-            if (process.ExitCode != 0)
-            {
-                throw new InvalidOperationException(
-                    $"makecab.exe failed (exit {process.ExitCode}): {error}{output}");
-            }
-
-            if (!File.Exists(cabPath))
-            {
-                throw new FileNotFoundException($"CAB file not created at: {cabPath}");
-            }
-
-            _logger.LogDebug("CAB created: {CabPath} ({Size:N0} bytes)",
-                cabPath, new FileInfo(cabPath).Length);
-
-            // Embed the CAB into the MSI as a stream named "product.cab"
+            // Step 2: open the MSI once and embed every cabinet as a stream.
             using var db = new Database(msiPath, DatabaseOpenMode.Direct);
-
-            using var view = db.OpenView(
-                "SELECT `Name`, `Data` FROM `_Streams`");
+            using var view = db.OpenView("SELECT `Name`, `Data` FROM `_Streams`");
             view.Execute();
 
-            using var record = new Record(2);
-            record.SetString(1, "product.cab");
-            record.SetStream(2, cabPath);
-            view.Modify(ViewModifyMode.Assign, record);
+            long totalCabBytes = 0;
+            int totalFiles = 0;
+            foreach (var seg in segments)
+            {
+                var cabPath = Path.Combine(tempDir, seg.CabinetName);
+                var cabBytes = new FileInfo(cabPath).Length;
+                totalCabBytes += cabBytes;
+                totalFiles += seg.Files.Count;
+
+                using var record = new Record(2);
+                record.SetString(1, seg.CabinetName);
+                record.SetStream(2, cabPath);
+                view.Modify(ViewModifyMode.Assign, record);
+
+                _logger.LogDebug(
+                    "Embedded cabinet '{CabName}': {Files} files, {Bytes:N0} bytes",
+                    seg.CabinetName, seg.Files.Count, cabBytes);
+            }
 
             db.Commit();
 
-            _logger.LogInformation("CAB embedded in MSI ({FileCount} files, {Size:N0} bytes)",
-                fileMapping.Count, new FileInfo(cabPath).Length);
+            _logger.LogInformation(
+                "CAB(s) embedded in MSI ({Cabs} cabinet(s), {Files} files, {Bytes:N0} bytes total)",
+                segments.Count, totalFiles, totalCabBytes);
         }
         finally
         {
             // Cleanup temp directory
             try { Directory.Delete(tempDir, true); } catch { }
         }
+    }
+
+    /// <summary>
+    /// Run makecab.exe once for a single cabinet segment, producing
+    /// <paramref name="tempDir"/>\{seg.CabinetName} on disk.
+    /// </summary>
+    private void BuildOneCabinet(string tempDir, CabinetSegment seg)
+    {
+        var ddfBaseName = Path.GetFileNameWithoutExtension(seg.CabinetName);
+        var ddfPath = Path.Combine(tempDir, $"{ddfBaseName}.ddf");
+        var ddf = new StringBuilder();
+        ddf.AppendLine(".OPTION EXPLICIT");
+        ddf.AppendLine($".Set CabinetNameTemplate={seg.CabinetName}");
+        ddf.AppendLine($".Set DiskDirectoryTemplate={tempDir}");
+        ddf.AppendLine(".Set Cabinet=on");
+        ddf.AppendLine(".Set Compress=on");
+        ddf.AppendLine(".Set CompressionType=MSZIP");
+        // MaxDiskSize=0 means "no limit" within THIS cabinet — we drive
+        // chunking ourselves at the file-group level (see PlanCabinetSegments)
+        // so makecab never needs to split mid-file across cabinets.
+        ddf.AppendLine(".Set MaxDiskSize=0");
+        ddf.AppendLine(".Set RptFileName=nul");
+        ddf.AppendLine(".Set InfFileName=nul");
+        ddf.AppendLine(".Set UniqueFiles=off");
+
+        foreach (var pf in seg.Files)
+        {
+            // makecab DDF syntax: "sourcePath" "destinationNameInCab"
+            ddf.AppendLine($"\"{pf.SourcePath}\" \"{pf.FileKey}\"");
+        }
+        File.WriteAllText(ddfPath, ddf.ToString());
+
+        var psi = new ProcessStartInfo
+        {
+            FileName = "makecab.exe",
+            Arguments = $"/F \"{ddfPath}\"",
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+            WorkingDirectory = tempDir
+        };
+
+        using var process = Process.Start(psi)!;
+        // Drain both streams concurrently to avoid the deadlock where makecab
+        // fills its stderr pipe while we're synchronously waiting on stdout
+        // (or vice versa). This bit large payloads on arm64 reliably.
+        var stdoutTask = process.StandardOutput.ReadToEndAsync();
+        var stderrTask = process.StandardError.ReadToEndAsync();
+        process.WaitForExit();
+        var output = stdoutTask.GetAwaiter().GetResult();
+        var error = stderrTask.GetAwaiter().GetResult();
+
+        if (process.ExitCode != 0)
+        {
+            throw new InvalidOperationException(
+                $"makecab.exe failed (exit {process.ExitCode}) building '{seg.CabinetName}': {error}{output}");
+        }
+
+        var cabPath = Path.Combine(tempDir, seg.CabinetName);
+        if (!File.Exists(cabPath))
+        {
+            throw new FileNotFoundException($"CAB file not created at: {cabPath}");
+        }
+
+        _logger.LogDebug("Built cabinet '{CabName}' ({Bytes:N0} bytes)",
+            seg.CabinetName, new FileInfo(cabPath).Length);
     }
 
     private static string EscSql(string value) => value.Replace("'", "''");
