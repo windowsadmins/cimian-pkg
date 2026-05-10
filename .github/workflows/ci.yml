@@ -16,6 +16,7 @@ permissions:
 env:
   DOTNET_VERSION: '10.0.x'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  TZ: 'America/Vancouver'
 
 jobs:
   build-test:

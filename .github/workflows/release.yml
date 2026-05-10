@@ -10,6 +10,7 @@ permissions:
 env:
   DOTNET_VERSION: '10.0.x'
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
+  TZ: 'America/Vancouver'
 
 jobs:
   build:
@@ -102,23 +103,31 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="${{ github.ref_name }}"
-          version="${{ steps.version.outputs.version }}"
           run_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          dotnet_version=$(dotnet --version | tr -d '\r\n')
+          os_caption=$(uname -sr)
 
           notes_body=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$tag" --jq .body)
 
           notes=$(cat <<EOF
           ## Build info
 
-          Built via GitHub Actions: $run_url. Provided **unsigned**.
+          This release was built with .NET SDK $dotnet_version on $os_caption, via a GitHub Actions workflow here: $run_url. It is provided **unsigned** — see signing instructions at the bottom.
 
           $notes_body
 
           ## Signing for enterprise deployment
 
+          Sign the binaries with your organization's code signing certificate before distribution:
+
           \`\`\`powershell
+          \$cert = "Your Certificate Name"
+          \$timestampUrl = "http://timestamp.digicert.com"
+
           Expand-Archive -Path cimipkg-win-x64.zip -DestinationPath .
-          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /n "Your Certificate Name" cimipkg.exe
+          Get-ChildItem -Recurse -Include *.exe,*.dll | ForEach-Object {
+              signtool sign /fd SHA256 /tr \$timestampUrl /td SHA256 /n \$cert \$_.FullName
+          }
           \`\`\`
 
           Built from commit \`$GITHUB_SHA\`.
@@ -126,7 +135,7 @@ jobs:
           )
 
           gh release create "$tag" \
-            --title "cimipkg $version" \
+            --title "cimipkg $tag" \
             --notes "$notes" \
             --latest \
             artifacts/cimipkg-win-x64.zip \
