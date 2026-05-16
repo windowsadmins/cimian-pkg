@@ -24,7 +24,8 @@ public class BuildInfoTests
         string? installLocation = null,
         string? installArguments = null,
         string? uninstallArguments = null,
-        string? upgradeCode = null)
+        string? upgradeCode = null,
+        string? keyPath = null)
     {
         return new BuildInfo
         {
@@ -41,6 +42,7 @@ public class BuildInfoTests
             InstallArguments = installArguments,
             UninstallArguments = uninstallArguments,
             UpgradeCode = upgradeCode,
+            KeyPath = keyPath,
         };
     }
 
@@ -405,6 +407,43 @@ public class BuildInfoTests
         bi.DoSubstitutions(envVars);
 
         Assert.Equal("1423F241DFF85AD2C8F31DBD70FB597DAC85BA4B", bi.SigningThumbprint);
+    }
+
+    [Fact]
+    public void DoSubstitutions_KeyPath_ResolvesEnvPlaceholder()
+    {
+        var bi = MakeBuildInfo(keyPath: @"${BIN_DIR}\foo.exe");
+        var envVars = Env(("BIN_DIR", "bin"));
+
+        bi.DoSubstitutions(envVars);
+
+        Assert.Equal(@"bin\foo.exe", bi.KeyPath);
+    }
+
+    [Fact]
+    public void DoSubstitutions_KeyPath_ResolvesVersionBackReference()
+    {
+        // ${version} expands to the resolved product version, same back-reference
+        // behaviour as the other path-like fields. Lets users pin key_path to a
+        // versioned subdir without restating the version literal.
+        var bi = MakeBuildInfo(version: "2026.05.16.1530", keyPath: @"v${version}\app.exe");
+
+        bi.DoSubstitutions();
+
+        Assert.Equal(@"v2026.05.16.1530\app.exe", bi.KeyPath);
+    }
+
+    [Fact]
+    public void DoSubstitutions_KeyPath_NullStaysNull()
+    {
+        // KeyPath is optional; substitution must be a no-op when not set so
+        // a YAML without a `key_path:` field stays clean (no empty string
+        // bleeding into downstream consumers).
+        var bi = MakeBuildInfo(keyPath: null);
+
+        bi.DoSubstitutions();
+
+        Assert.Null(bi.KeyPath);
     }
 
     #endregion
