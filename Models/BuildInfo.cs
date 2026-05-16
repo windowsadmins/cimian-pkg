@@ -51,6 +51,7 @@ public class BuildInfo
         InstallArguments    = Expand(InstallArguments,    envVars, v);
         UninstallArguments  = Expand(UninstallArguments,  envVars, v);
         UpgradeCode         = Expand(UpgradeCode,         envVars, v);
+        KeyPath             = Expand(KeyPath,             envVars, v);
     }
 
     private static string? Expand(
@@ -192,8 +193,10 @@ public class BuildInfo
     /// <summary>
     /// Explicit override for the primary installed binary used by Cimian's
     /// MSI-verification defense-in-depth check (the pkginfo "key_path" field).
-    /// Value can be either a path absolute to install_location (e.g.
-    /// "managedreportsrunner.exe", "bin/app.exe") or an absolute Windows path.
+    /// Value can be either a path relative to install_location (e.g.
+    /// "managedreportsrunner.exe", "bin/app.exe") or an absolute Windows path
+    /// (e.g. "C:\Program Files\Foo\foo.exe"). Like other path-like fields here,
+    /// ${...} placeholders are resolved in <see cref="DoSubstitutions"/>.
     /// When omitted, cimiimport auto-detects the primary binary by querying the
     /// MSI's File/Component/Directory tables — single .exe wins, else .exe
     /// matching product.name, else the largest .exe.
