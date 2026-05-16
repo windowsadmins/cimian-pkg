@@ -190,6 +190,18 @@ public class BuildInfo
     public string? UpgradeCode { get; set; }
 
     /// <summary>
+    /// Explicit override for the primary installed binary used by Cimian's
+    /// MSI-verification defense-in-depth check (the pkginfo "key_path" field).
+    /// Value can be either a path absolute to install_location (e.g.
+    /// "managedreportsrunner.exe", "bin/app.exe") or an absolute Windows path.
+    /// When omitted, cimiimport auto-detects the primary binary by querying the
+    /// MSI's File/Component/Directory tables — single .exe wins, else .exe
+    /// matching product.name, else the largest .exe.
+    /// </summary>
+    [YamlMember(Alias = "key_path")]
+    public string? KeyPath { get; set; }
+
+    /// <summary>
     /// Additional custom MSI properties to embed.
     /// </summary>
     [YamlMember(Alias = "msi_properties")]
