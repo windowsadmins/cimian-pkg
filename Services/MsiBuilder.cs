@@ -227,12 +227,13 @@ public class MsiBuilder
             _logger.LogDebug("Creating tables...");
             CreateTables(db);
 
+            var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
+
             _logger.LogDebug("Writing properties...");
             WriteProperties(db, productName, msiVersion, fullVersion, identifier,
-                productCode, upgradeCode, buildInfo, buildInfoYaml);
+                productCode, upgradeCode, buildInfo, buildInfoYaml, isInstallerType);
 
             _logger.LogDebug("Writing directory table...");
-            var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
             WriteDirectoryTable(db, buildInfo.InstallLocation ?? string.Empty, isInstallerType, productName);
 
             // For scripts: installDir is where MSI puts files. For installer-type, this is
@@ -371,7 +372,8 @@ public class MsiBuilder
         Guid productCode,
         Guid upgradeCode,
         BuildInfo buildInfo,
-        string buildInfoYaml)
+        string buildInfoYaml,
+        bool isInstallerType)
     {
         void SetProperty(string name, string value)
         {
@@ -401,6 +403,14 @@ public class MsiBuilder
         SetProperty("ALLUSERS", "1");
         SetProperty("ARPNOREPAIR", "1");
         SetProperty("ARPNOMODIFY", "1");
+        // Installer-type packages wrap a vendor installer (MSI/EXE) that registers
+        // its own Add/Remove Programs entry. Without this, the user sees two ARP
+        // rows for the same software — the cimipkg wrapper and the vendor entry.
+        // SystemComponent=1 keeps the wrapper installed and visible to MSI tooling
+        // (managedsoftwareupdate / managedreportsrunner read it via MsiPropertyReader)
+        // while hiding it from Programs and Features.
+        if (isInstallerType)
+            SetProperty("ARPSYSTEMCOMPONENT", "1");
         SetProperty("MSIFASTINSTALL", "7");
         SetProperty("MsiLogging", "voicewarmup");
 
