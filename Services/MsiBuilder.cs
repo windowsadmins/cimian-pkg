@@ -227,13 +227,12 @@ public class MsiBuilder
             _logger.LogDebug("Creating tables...");
             CreateTables(db);
 
-            var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
-
             _logger.LogDebug("Writing properties...");
             WriteProperties(db, productName, msiVersion, fullVersion, identifier,
-                productCode, upgradeCode, buildInfo, buildInfoYaml, isInstallerType);
+                productCode, upgradeCode, buildInfo, buildInfoYaml);
 
             _logger.LogDebug("Writing directory table...");
+            var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
             WriteDirectoryTable(db, buildInfo.InstallLocation ?? string.Empty, isInstallerType, productName);
 
             // For scripts: installDir is where MSI puts files. For installer-type, this is
@@ -273,6 +272,9 @@ public class MsiBuilder
 
             _logger.LogDebug("Writing install sequence...");
             WriteInstallSequence(db, hasScripts, hasPayloadFiles);
+
+            _logger.LogDebug("Writing launch conditions...");
+            WriteLaunchConditions(db);
 
             if (hasScripts)
             {
@@ -342,9 +344,55 @@ public class MsiBuilder
         // InstallExecuteSequence table
         db.Execute("CREATE TABLE `InstallExecuteSequence` (`Action` CHAR(72) NOT NULL, `Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)");
 
+        // LaunchCondition / AppSearch / RegLocator — Windows Installer's
+        // standard mechanism for aborting an install before any side effect
+        // occurs. cimipkg writes one entry today (REBOOTPENDING) so a system
+        // with a pending reboot fails fast with a clear message instead of
+        // letting msiexec stumble into mid-install state. See WriteLaunchConditions.
+        db.Execute("CREATE TABLE `LaunchCondition` (`Condition` CHAR(255) NOT NULL, `Description` LONGCHAR NOT NULL LOCALIZABLE PRIMARY KEY `Condition`)");
+        db.Execute("CREATE TABLE `AppSearch` (`Property` CHAR(72) NOT NULL, `Signature_` CHAR(72) NOT NULL PRIMARY KEY `Property`, `Signature_`)");
+        db.Execute("CREATE TABLE `RegLocator` (`Signature_` CHAR(72) NOT NULL, `Root` SHORT NOT NULL, `Key` CHAR(255) NOT NULL, `Name` CHAR(255), `Type` SHORT PRIMARY KEY `Signature_`)");
+
         // Upgrade table is intentionally NOT created. cimipkg MSIs do not
         // participate in major-upgrade handling — see the comment in Build()
         // for why.
+    }
+
+    /// <summary>
+    /// Populates LaunchCondition + AppSearch + RegLocator with cimipkg's
+    /// universal preflight checks. Today: REBOOTPENDING. Future: disk-space
+    /// (needs a Type 19 error custom action since MSI's PrimaryVolumeSpaceAvailable
+    /// only resolves after CostFinalize, too late for sequence 100).
+    ///
+    /// Set the build-time environment variable CIMIAN_PKG_DISABLE_LAUNCH_CONDITIONS=1
+    /// to suppress all checks — kill switch for a misbehaving condition in the
+    /// field. The tables themselves are still created so the schema is stable.
+    /// </summary>
+    private static void WriteLaunchConditions(Database db)
+    {
+        if (Environment.GetEnvironmentVariable("CIMIAN_PKG_DISABLE_LAUNCH_CONDITIONS") == "1")
+        {
+            return;
+        }
+
+        // REBOOTPENDING probe — HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\
+        //   Component Based Servicing\RebootPending. Default value's presence
+        //   is what we care about; Type=2 (msidbLocatorTypeRawValue) returns the
+        //   raw value (or null if the key is absent). AppSearch copies it into
+        //   the REBOOTPENDING property; LaunchCondition fires if non-empty.
+        db.Execute(
+            "INSERT INTO `RegLocator` (`Signature_`, `Root`, `Key`, `Name`, `Type`) " +
+            "VALUES ('Sig_CimianRebootPending', 2, " +
+            "'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending', " +
+            "NULL, 2)");
+        db.Execute(
+            "INSERT INTO `AppSearch` (`Property`, `Signature_`) " +
+            "VALUES ('REBOOTPENDING', 'Sig_CimianRebootPending')");
+        db.Execute(
+            "INSERT INTO `LaunchCondition` (`Condition`, `Description`) " +
+            "VALUES ('Installed OR NOT REBOOTPENDING', " +
+            "'A pending Windows reboot must be completed before this Cimian package can be installed. " +
+            "Please reboot the computer and run the installer again.')");
     }
 
     private static void WriteSummaryInfo(string msiPath, string productName, string msiVersion, BuildInfo buildInfo)
@@ -372,8 +420,7 @@ public class MsiBuilder
         Guid productCode,
         Guid upgradeCode,
         BuildInfo buildInfo,
-        string buildInfoYaml,
-        bool isInstallerType)
+        string buildInfoYaml)
     {
         void SetProperty(string name, string value)
         {
@@ -403,14 +450,6 @@ public class MsiBuilder
         SetProperty("ALLUSERS", "1");
         SetProperty("ARPNOREPAIR", "1");
         SetProperty("ARPNOMODIFY", "1");
-        // Installer-type packages wrap a vendor installer (MSI/EXE) that registers
-        // its own Add/Remove Programs entry. Without this, the user sees two ARP
-        // rows for the same software — the cimipkg wrapper and the vendor entry.
-        // SystemComponent=1 keeps the wrapper installed and visible to MSI tooling
-        // (managedsoftwareupdate / managedreportsrunner read it via MsiPropertyReader)
-        // while hiding it from Programs and Features.
-        if (isInstallerType)
-            SetProperty("ARPSYSTEMCOMPONENT", "1");
         SetProperty("MSIFASTINSTALL", "7");
         SetProperty("MsiLogging", "voicewarmup");
 
