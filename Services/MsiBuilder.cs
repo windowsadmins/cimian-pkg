@@ -227,6 +227,9 @@ public class MsiBuilder
             _logger.LogDebug("Creating tables...");
             CreateTables(db);
 
+            // Installer-type wraps a vendor MSI/EXE that registers its own ARP
+            // entry — WriteProperties uses this to set ARPSYSTEMCOMPONENT=1 on
+            // the wrapper so users don't see two rows for the same software.
             var isInstallerType = string.IsNullOrWhiteSpace(buildInfo.InstallLocation);
 
             _logger.LogDebug("Writing properties...");
@@ -273,6 +276,9 @@ public class MsiBuilder
 
             _logger.LogDebug("Writing install sequence...");
             WriteInstallSequence(db, hasScripts, hasPayloadFiles);
+
+            _logger.LogDebug("Writing launch conditions...");
+            WriteLaunchConditions(db);
 
             if (hasScripts)
             {
@@ -342,9 +348,62 @@ public class MsiBuilder
         // InstallExecuteSequence table
         db.Execute("CREATE TABLE `InstallExecuteSequence` (`Action` CHAR(72) NOT NULL, `Condition` CHAR(255), `Sequence` SHORT PRIMARY KEY `Action`)");
 
+        // LaunchCondition / AppSearch / RegLocator — Windows Installer's
+        // standard mechanism for aborting an install before any side effect
+        // occurs. cimipkg writes one entry today (REBOOTPENDING) so a system
+        // with a pending reboot fails fast with a clear message instead of
+        // letting msiexec stumble into mid-install state. See WriteLaunchConditions.
+        db.Execute("CREATE TABLE `LaunchCondition` (`Condition` CHAR(255) NOT NULL, `Description` LONGCHAR NOT NULL LOCALIZABLE PRIMARY KEY `Condition`)");
+        // AppSearch's PK is Property alone per the MSI standard schema — one
+        // search result per property. A composite (Property, Signature_) key
+        // would allow duplicate Property rows and deviate from what validation
+        // tools (msival2, light) expect, making search results ambiguous if
+        // duplicates ever crept in.
+        db.Execute("CREATE TABLE `AppSearch` (`Property` CHAR(72) NOT NULL, `Signature_` CHAR(72) NOT NULL PRIMARY KEY `Property`)");
+        db.Execute("CREATE TABLE `RegLocator` (`Signature_` CHAR(72) NOT NULL, `Root` SHORT NOT NULL, `Key` CHAR(255) NOT NULL, `Name` CHAR(255), `Type` SHORT PRIMARY KEY `Signature_`)");
+
         // Upgrade table is intentionally NOT created. cimipkg MSIs do not
         // participate in major-upgrade handling — see the comment in Build()
         // for why.
+    }
+
+    /// <summary>
+    /// Populates LaunchCondition + AppSearch + RegLocator with cimipkg's
+    /// universal preflight checks. Today: REBOOTPENDING. Future: disk-space
+    /// (needs a Type 19 error custom action since MSI's PrimaryVolumeSpaceAvailable
+    /// only resolves after CostFinalize, too late for sequence 100).
+    ///
+    /// Set the build-time environment variable CIMIAN_PKG_DISABLE_LAUNCH_CONDITIONS=1
+    /// to suppress all checks — kill switch for a misbehaving condition in the
+    /// field. The tables themselves are still created so the schema is stable.
+    /// </summary>
+    private static void WriteLaunchConditions(Database db)
+    {
+        if (Environment.GetEnvironmentVariable("CIMIAN_PKG_DISABLE_LAUNCH_CONDITIONS") == "1")
+        {
+            return;
+        }
+
+        // REBOOTPENDING probe — HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\
+        //   Component Based Servicing\RebootPending. With Name=NULL the
+        //   RegLocator search resolves to the *existence of the key itself*
+        //   (per MSI docs) rather than any particular value, which is what we
+        //   want for the CBS\RebootPending key — its presence alone signals a
+        //   pending reboot. AppSearch copies the result into the REBOOTPENDING
+        //   property; LaunchCondition fires if it ends up non-empty.
+        db.Execute(
+            "INSERT INTO `RegLocator` (`Signature_`, `Root`, `Key`, `Name`, `Type`) " +
+            "VALUES ('Sig_CimianRebootPending', 2, " +
+            "'SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\RebootPending', " +
+            "NULL, 2)");
+        db.Execute(
+            "INSERT INTO `AppSearch` (`Property`, `Signature_`) " +
+            "VALUES ('REBOOTPENDING', 'Sig_CimianRebootPending')");
+        db.Execute(
+            "INSERT INTO `LaunchCondition` (`Condition`, `Description`) " +
+            "VALUES ('Installed OR NOT REBOOTPENDING', " +
+            "'A pending Windows reboot must be completed before this Cimian package can be installed. " +
+            "Please reboot the computer and run the installer again.')");
     }
 
     private static void WriteSummaryInfo(string msiPath, string productName, string msiVersion, BuildInfo buildInfo)
@@ -404,11 +463,13 @@ public class MsiBuilder
         SetProperty("ARPNOREPAIR", "1");
         SetProperty("ARPNOMODIFY", "1");
         // Installer-type packages wrap a vendor installer (MSI/EXE) that registers
-        // its own Add/Remove Programs entry. Without this, the user sees two ARP
-        // rows for the same software — the cimipkg wrapper and the vendor entry.
-        // SystemComponent=1 keeps the wrapper installed and visible to MSI tooling
-        // (managedsoftwareupdate / managedreportsrunner read it via MsiPropertyReader)
-        // while hiding it from Programs and Features.
+        // its own Add/Remove Programs entry. Without ARPSYSTEMCOMPONENT=1, users
+        // see two ARP rows for the same software — the cimipkg wrapper and the
+        // vendor's entry. SystemComponent=1 keeps the wrapper installed and
+        // visible to MSI tooling (managedsoftwareupdate / managedreportsrunner
+        // read it via MsiPropertyReader from the registry, not the ARP UI) while
+        // hiding it from Programs and Features. Originally added in PR #22; the
+        // REBOOTPENDING work in PR #23 dropped it by accident — restored here.
         if (isInstallerType)
             SetProperty("ARPSYSTEMCOMPONENT", "1");
         SetProperty("MSIFASTINSTALL", "7");
@@ -681,8 +742,14 @@ public class MsiBuilder
         // Standard install sequence. FindRelatedProducts and RemoveExistingProducts
         // are intentionally absent: cimipkg MSIs are stateless deployers and never
         // try to remove a previously-installed product (see Build() for context).
+        //
+        // AppSearch MUST run before LaunchConditions so the REBOOTPENDING
+        // property is populated before the launch condition evaluates it.
+        // The MSI standard puts AppSearch at sequence 50 for exactly this
+        // reason — running it at 400 (after LaunchConditions at 100) means
+        // the condition sees an empty property and never fires.
+        AddAction("AppSearch", null, 50);
         AddAction("LaunchConditions", null, 100);
-        AddAction("AppSearch", null, 400);
         AddAction("CostInitialize", null, 800);
         AddAction("FileCost", null, 900);
         AddAction("CostFinalize", null, 1000);
