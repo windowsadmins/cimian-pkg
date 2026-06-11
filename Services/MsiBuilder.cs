@@ -861,7 +861,7 @@ public class MsiBuilder
     }
 
     /// <summary>
-    /// Write a Type 102 inline VBScript custom action that runs a PowerShell script
+    /// Write a Type 38 inline VBScript custom action that runs a PowerShell script
     /// of arbitrary size. The VBS ships the PS1 content as a chunked base64 string,
     /// decodes it at install time via MSXML + ADODB.Stream, writes it to a temp
     /// .ps1 file, and invokes <c>powershell.exe -File</c> on it.
@@ -885,7 +885,14 @@ public class MsiBuilder
     private static void WriteImmediateScriptAction(Database db, string actionName, string scriptContent)
     {
         var vbsStr = BuildScriptActionVbs(actionName, scriptContent);
-        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 102, '', '{EscSql(vbsStr)}', 0)");
+        // Type 38 = inline VBScript (Target column). Deliberately NOT +64
+        // (msidbCustomActionTypeContinue): a failing preinstall/postinstall
+        // script must fail the MSI so the managing client records a failed
+        // install instead of a phantom success that installchecks then refute
+        // forever (the WinAdminsAccount install-loop incident, June 2026).
+        // The VBS itself only raises for cimianPhase = "install", so uninstall
+        // scripts stay best-effort.
+        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 38, '', '{EscSql(vbsStr)}', 0)");
     }
 
     /// <summary>
@@ -940,6 +947,7 @@ public class MsiBuilder
         vbs.Append("On Error Resume Next\r\n");
         vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
         vbs.Append("Dim cimianPhase, cimianRemove\r\n");
+        vbs.Append("Dim q, cmdLine, logFile, logDir, logStream, logLine, lineCount, prodName, ch\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
         vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
@@ -999,6 +1007,9 @@ public class MsiBuilder
         // Clear Err before staging so the check at the end only catches staging
         // failures (decode/write), not earlier non-fatal errors from e.g. env
         // variable assignment or fso.FileExists probes.
+        // Seed rc before staging so a staging failure (script never ran) is
+        // indistinguishable from a launch failure at the final exit-code check.
+        vbs.Append("rc = -1\r\n");
         vbs.Append("Err.Clear\r\n");
         vbs.Append("Set xml = CreateObject(\"Msxml2.DOMDocument.6.0\")\r\n");
         vbs.Append("Set node = xml.CreateElement(\"b\")\r\n");
@@ -1026,17 +1037,69 @@ public class MsiBuilder
         // Clear Err + seed rc with a sentinel so we can tell "ws.Run never ran" from
         // "ws.Run ran and powershell exited with code N".
         vbs.Append("  Err.Clear\r\n");
-        vbs.Append("  rc = -1\r\n");
         // psExe is a VBS variable resolved above (pwsh.exe 7 if installed, else
         // powershell.exe 5.1). Concatenate it into the command line so the
         // custom action never hard-codes a runtime at MSI build time.
-        vbs.Append("  rc = ws.Run(\"\"\"\" & psExe & \"\"\" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"\"\" & tmpFile & \"\"\"\", 0, True)\r\n");
+        //
+        // The script runs through cmd.exe so stdout+stderr can be redirected to a
+        // sidecar log: ws.Run goes straight to CreateProcess, which has no
+        // redirection of its own, and the hidden window means console output is
+        // otherwise lost forever. The log is echoed into Session.Log (visible in
+        // the msiexec /l*v log) and persisted under ManagedInstalls\Logs so
+        // endpoint tooling (e.g. an installcheck_script) can surface the last
+        // attempt's output into the managing client's run log.
+        vbs.Append("  q = Chr(34)\r\n");
+        vbs.Append("  logFile = tmpFile & \".log\"\r\n");
+        vbs.Append("  cmdLine = \"cmd.exe /c \" & q & q & psExe & q & \" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \" & q & tmpFile & q & \" > \" & q & logFile & q & \" 2>&1\" & q\r\n");
+        vbs.Append("  rc = ws.Run(cmdLine, 0, True)\r\n");
         vbs.Append("  If Err.Number <> 0 Then\r\n");
         vbs.Append($"    Session.Log \"{actionName}: failed to start powershell: \" & Err.Number & \" - \" & Err.Description\r\n");
         vbs.Append("  Else\r\n");
         vbs.Append($"    Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
         vbs.Append("  End If\r\n");
+        // Echo captured script output (capped) and persist a copy for endpoint tooling.
+        vbs.Append("  If fso.FileExists(logFile) Then\r\n");
+        vbs.Append("    Set logStream = fso.OpenTextFile(logFile, 1)\r\n");
+        vbs.Append("    lineCount = 0\r\n");
+        vbs.Append("    Do While Not logStream.AtEndOfStream And lineCount < 200\r\n");
+        vbs.Append("      logLine = logStream.ReadLine\r\n");
+        vbs.Append($"      Session.Log \"{actionName} | \" & logLine\r\n");
+        vbs.Append("      lineCount = lineCount + 1\r\n");
+        vbs.Append("    Loop\r\n");
+        vbs.Append($"    If Not logStream.AtEndOfStream Then Session.Log \"{actionName} | ... output truncated at 200 lines\"\r\n");
+        vbs.Append("    logStream.Close\r\n");
+        // ProductName feeds a filename, so strip the characters NTFS rejects.
+        vbs.Append("    prodName = Session.Property(\"ProductName\")\r\n");
+        vbs.Append("    For Each ch In Array(\"\\\", \"/\", \":\", \"*\", \"?\", q, \"<\", \">\", \"|\")\r\n");
+        vbs.Append("      prodName = Replace(prodName, ch, \"_\")\r\n");
+        vbs.Append("    Next\r\n");
+        // CreateFolder cannot create nested paths, so build each level. Failures
+        // here (and in CopyFile) are non-fatal: Session.Log already has the
+        // output, and the temp log is only removed once the copy succeeded.
+        vbs.Append("    logDir = ws.ExpandEnvironmentStrings(\"%ProgramData%\") & \"\\ManagedInstalls\"\r\n");
+        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
+        vbs.Append("    logDir = logDir & \"\\Logs\"\r\n");
+        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
+        vbs.Append("    Err.Clear\r\n");
+        vbs.Append($"    fso.CopyFile logFile, logDir & \"\\cimipkg-\" & prodName & \"-{actionName}.log\", True\r\n");
+        vbs.Append("    If Err.Number = 0 Then\r\n");
+        vbs.Append("      fso.DeleteFile logFile\r\n");
+        vbs.Append("    Else\r\n");
+        vbs.Append($"      Session.Log \"{actionName}: could not persist log copy: \" & Err.Description\r\n");
+        vbs.Append("      Err.Clear\r\n");
+        vbs.Append("    End If\r\n");
+        vbs.Append("  End If\r\n");
         vbs.Append("  If fso.FileExists(tmpFile) Then fso.DeleteFile tmpFile\r\n");
+        vbs.Append("End If\r\n");
+        // A non-zero script exit must fail the action (and with it the install)
+        // so the managing client records a real failure instead of a phantom
+        // success. rc = -1 covers both "staging failed, script never ran" and
+        // "ws.Run never started powershell". Uninstall scripts stay
+        // best-effort: a broken uninstall script should not wedge removal.
+        vbs.Append("If cimianPhase = \"install\" And rc <> 0 Then\r\n");
+        vbs.Append($"  Session.Log \"{actionName}: script failed (exit \" & rc & \") - failing action\"\r\n");
+        vbs.Append("  On Error GoTo 0\r\n");
+        vbs.Append($"  Err.Raise vbObjectError + 27, \"{actionName}\", \"PowerShell script exited \" & rc\r\n");
         vbs.Append("End If\r\n");
 
         return vbs.ToString();
