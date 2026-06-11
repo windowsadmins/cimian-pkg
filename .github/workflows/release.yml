@@ -108,6 +108,7 @@ jobs:
           os_caption=$(uname -sr)
 
           notes_body=$(gh api -X POST "repos/$GITHUB_REPOSITORY/releases/generate-notes" -f tag_name="$tag" --jq .body)
+          notes_body=$(printf '%s\n' "$notes_body" | sed -E -e 's/ by @[A-Za-z0-9_-]+ in / in /g' -e '/^#+ New Contributors/d' -e '/made their first contribution/d')
 
           notes=$(cat <<EOF
           ## Build info
