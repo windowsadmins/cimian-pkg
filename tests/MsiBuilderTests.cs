@@ -157,23 +157,60 @@ public class MsiBuilderTests
         // runtime-resolved psExe variable instead.
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
 
-        // The ws.Run line must concatenate psExe, not embed a literal
+        // The command line must concatenate psExe, not embed a literal
         // powershell.exe path directly inside the string literal.
-        Assert.Contains("ws.Run(\"\"\"\" & psExe & \"\"\"", vbs);
+        Assert.Contains("& psExe &", vbs);
+        Assert.Contains("ws.Run(cmdLine, 0, True)", vbs);
 
         // And the only literal mentions of the 5.1 path should be the
-        // fallback assignment - not an argument to ws.Run.
-        var wsRunLines = vbs
+        // fallback assignment - not part of the executed command line.
+        var cmdLines = vbs
             .Replace("\r\n", "\n")
             .Split('\n')
-            .Where(l => l.Contains("ws.Run("))
+            .Where(l => l.Contains("ws.Run(") || l.Contains("cmdLine = "))
             .ToList();
-        Assert.NotEmpty(wsRunLines);
-        foreach (var line in wsRunLines)
+        Assert.NotEmpty(cmdLines);
+        foreach (var line in cmdLines)
         {
             Assert.DoesNotContain("WindowsPowerShell\\v1.0\\powershell.exe", line);
             Assert.DoesNotContain("PowerShell\\7\\pwsh.exe", line);
         }
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_CapturesScriptOutputToSidecarLog()
+    {
+        // The script runs hidden under msiexec, so without redirection its
+        // output is lost forever. The custom action must route stdout+stderr
+        // to a sidecar log, echo it into Session.Log, and persist a copy under
+        // ManagedInstalls\Logs for endpoint tooling to surface.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        Assert.Contains("logFile = tmpFile & \".log\"", vbs);
+        Assert.Contains("2>&1", vbs);
+        Assert.Contains("\\ManagedInstalls", vbs);
+        Assert.Contains("cimipkg-", vbs);
+        // ProductName feeds a filename and must be sanitized first.
+        Assert.Contains("prodName = Replace(prodName, ch, \"_\")", vbs);
+        // The temp log must survive a failed persistence copy (output would
+        // otherwise be lost), so deletion is gated on CopyFile succeeding.
+        Assert.Contains("If Err.Number = 0 Then", vbs);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_FailsActionOnNonZeroExit_InstallPhaseOnly()
+    {
+        // A failing install-phase script must fail the MSI (no more phantom
+        // successes that installchecks refute forever - the WinAdminsAccount
+        // install-loop incident). Uninstall scripts stay best-effort so a
+        // broken uninstall script cannot wedge product removal.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        Assert.Contains("If cimianPhase = \"install\" And rc <> 0 Then", vbs);
+        Assert.Contains("Err.Raise", vbs);
+        // The raise must escape the script-wide On Error Resume Next, or it
+        // would be silently swallowed like everything else.
+        Assert.Contains("On Error GoTo 0", vbs);
     }
 
     private static void AssertAllLinesUnderLimit(string vbs)
