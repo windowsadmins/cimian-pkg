@@ -132,6 +132,35 @@ public class NoUpgradeMachineryTests
         }
     }
 
+    [Theory]
+    [InlineData(true,  true)]
+    [InlineData(true,  false)]
+    [InlineData(false, true)]
+    [InlineData(false, false)]
+    public void Sequenced_AppSearch_AlwaysHasSignatureTable(bool hasScripts, bool hasPayload)
+    {
+        // Regression for the 2228 "Unknown table 'Signature'" -> 1603 install
+        // failure. A sequenced AppSearch makes some Windows Installer engines
+        // (notably ones reporting the legacy 6.3/9600 profile) eagerly run the
+        // file-locator probe SELECT ... FROM `Signature` even when no AppSearch
+        // row references a file signature. If AppSearch is in the sequence, the
+        // Signature table must exist or the whole install aborts before any
+        // payload or custom action runs.
+        var msi = BuildSchemaAndSequenceMsi(hasScripts, hasPayload);
+        try
+        {
+            var actions = ListInstallExecuteSequenceActions(msi);
+            if (actions.Contains("AppSearch"))
+            {
+                Assert.Contains("Signature", ListTables(msi));
+            }
+        }
+        finally
+        {
+            File.Delete(msi);
+        }
+    }
+
     [Fact]
     public void WriteInstallSequence_StillEmitsRequiredStandardActions()
     {
