@@ -361,6 +361,19 @@ public class MsiBuilder
         // duplicates ever crept in.
         db.Execute("CREATE TABLE `AppSearch` (`Property` CHAR(72) NOT NULL, `Signature_` CHAR(72) NOT NULL PRIMARY KEY `Property`)");
         db.Execute("CREATE TABLE `RegLocator` (`Signature_` CHAR(72) NOT NULL, `Root` SHORT NOT NULL, `Key` CHAR(255) NOT NULL, `Name` CHAR(255), `Type` SHORT PRIMARY KEY `Signature_`)");
+        // Signature is the file-locator detail table. cimipkg writes no rows to
+        // it (our only AppSearch entry is a Type-2 raw RegLocator value), but the
+        // table MUST exist whenever AppSearch is sequenced. Some Windows Installer
+        // engines — notably ones reporting the legacy 6.3/9600 profile under an
+        // app-compat shim — eagerly run the file-locator probe
+        // (SELECT FileName, MinVersion ... FROM `Signature` WHERE `Signature`=?)
+        // while resolving AppSearch, regardless of whether any row references a
+        // file signature. With the table absent that probe fails with error 2228
+        // ("Unknown table 'Signature'"), AppSearch returns 3, and the whole
+        // install aborts with 1603 before any payload or custom action runs.
+        // An empty Signature table makes the probe a harmless no-match on every
+        // engine while leaving the REBOOTPENDING RegLocator search intact.
+        db.Execute("CREATE TABLE `Signature` (`Signature` CHAR(72) NOT NULL, `FileName` CHAR(255) NOT NULL LOCALIZABLE, `MinVersion` CHAR(20), `MaxVersion` CHAR(20), `MinSize` LONG, `MaxSize` LONG, `MinDate` LONG, `MaxDate` LONG, `Languages` CHAR(255) PRIMARY KEY `Signature`)");
 
         // Upgrade table is intentionally NOT created. cimipkg MSIs do not
         // participate in major-upgrade handling — see the comment in Build()
