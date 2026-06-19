@@ -481,11 +481,10 @@ public class MsiBuilder
         SetProperty("ProductVersion", msiVersion);
         SetProperty("ProductCode", $"{{{productCode}}}");
         SetProperty("UpgradeCode", $"{{{upgradeCode}}}");
-        // PREVIOUSVERSIONSINSTALLED is populated by FindRelatedProducts and
-        // consumed by RemoveExistingProducts. Declaring it secure lets its value
-        // cross the UI→execute boundary intact (and silences ICE validation),
-        // even though /qn installs never run a UI sequence.
-        SetProperty("SecureCustomProperties", "PREVIOUSVERSIONSINSTALLED");
+        // SecureCustomProperties (which must list PREVIOUSVERSIONSINSTALLED for the
+        // upgrade machinery) is written once, after the user msi_properties loop
+        // below, so a package-supplied value is unioned rather than colliding on
+        // the Property table primary key.
         SetProperty("Manufacturer", buildInfo.Product.Developer ?? "Unknown");
         SetProperty("ProductLanguage", "1033");
         SetProperty("ALLUSERS", "1");
@@ -544,18 +543,32 @@ public class MsiBuilder
             SetProperty("CIMIAN_PKG_BUILD_INFO", encoded);
         }
 
-        // User-supplied msi_properties from build-info.yaml. There is no longer
-        // any cimipkg-managed SecureCustomProperties / PREVIOUSVERSIONSINSTALLED
-        // merge to do — the Upgrade table is gone, so neither is populated at
-        // install time — but a user can still pass either through verbatim if
-        // their package needs it.
+        // User-supplied msi_properties from build-info.yaml are written verbatim,
+        // with one exception: SecureCustomProperties must always include
+        // PREVIOUSVERSIONSINSTALLED — it is set by FindRelatedProducts and consumed
+        // by RemoveExistingProducts, and declaring it secure lets the value cross
+        // the UI→execute boundary intact and pass ICE validation. If a package also
+        // supplies SecureCustomProperties we union the two semicolon-delimited lists
+        // and emit a single Property row, rather than inserting the key twice and
+        // colliding on the Property table primary key.
+        var secureProps = new List<string> { "PREVIOUSVERSIONSINSTALLED" };
         if (buildInfo.MsiProperties != null)
         {
             foreach (var (key, value) in buildInfo.MsiProperties)
             {
+                if (string.Equals(key, "SecureCustomProperties", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var p in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        if (!secureProps.Contains(p, StringComparer.OrdinalIgnoreCase))
+                            secureProps.Add(p);
+                    }
+                    continue;
+                }
                 SetProperty(key, value);
             }
         }
+        SetProperty("SecureCustomProperties", string.Join(";", secureProps));
     }
 
     /// <summary>
