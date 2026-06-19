@@ -19,8 +19,9 @@ public class MsiBuilder
     private readonly ISerializer _yamlSerializer;
 
     // Standard MSI sequence numbers for InstallExecuteSequence.
-    // FindRelatedProducts/RemoveExistingProducts are intentionally absent —
-    // cimipkg MSIs do not participate in major upgrades (see Build()).
+    // FindRelatedProducts + RemoveExistingProducts supersede older builds of the
+    // same product (same UpgradeCode) so ARP never accumulates copies — see
+    // WriteInstallSequence and WriteUpgradeTable.
     private const int SeqLaunchConditions = 100;
     private const int SeqPreinstallScript = 3900;
     private const int SeqInstallFiles = 4000;
@@ -245,17 +246,20 @@ public class MsiBuilder
                 ? "[INSTALLDIR]"  // placeholder — actual path resolved at install time
                 : buildInfo.InstallLocation!.TrimEnd('\\', '/');
 
-            // No Upgrade table by design — cimipkg MSIs are stateless deployers, not
-            // managed products. Each MSI just runs preinstall → copies payload →
-            // runs postinstall, regardless of what's already on disk. Keeping
-            // FindRelatedProducts / RemoveExistingProducts (and their Upgrade row)
-            // turned every upgrade into a Windows Installer source-resolution dance
-            // that prompted for the previous MSI's installer file when the
-            // RemoveExistingProducts pass needed to revisit the old package — and
-            // failed silently when the bootstrap cache had rotated it away. The
-            // UpgradeCode property is still emitted in WriteProperties as metadata
-            // for downstream readers (managedsoftwareupdate / cimistatus); it just
-            // no longer drives any install-time behavior.
+            // Supersede any previously-installed build of this same product.
+            // cimipkg MSIs are still stateless deployers — each one always runs
+            // preinstall → copies payload → runs postinstall regardless of
+            // what's on disk — but they must not accumulate: before this, every
+            // build (random ProductCode, no removal) stacked a new ARP entry, so
+            // a machine ended up with dozens of co-installed copies of the same
+            // product sharing one keypath. The Upgrade row + FindRelatedProducts
+            // + RemoveExistingProducts remove every other product with this
+            // (deterministic) UpgradeCode so exactly one remains. The
+            // IgnoreRemoveFailure attribute (see WriteUpgradeTable) makes removal
+            // best-effort: a broken/unresolvable old package is skipped, never
+            // aborting the new install — that abort was the field failure (#19)
+            // that originally motivated dropping the table.
+            WriteUpgradeTable(db, upgradeCode);
 
             // Plan the cabinet layout once; both WritePayloadTables (Media/File
             // rows) and EmbedPayloadCabs (makecab + stream embedding) consume
@@ -375,9 +379,16 @@ public class MsiBuilder
         // engine while leaving the REBOOTPENDING RegLocator search intact.
         db.Execute("CREATE TABLE `Signature` (`Signature` CHAR(72) NOT NULL, `FileName` CHAR(255) NOT NULL LOCALIZABLE, `MinVersion` CHAR(20), `MaxVersion` CHAR(20), `MinSize` LONG, `MaxSize` LONG, `MinDate` LONG, `MaxDate` LONG, `Languages` CHAR(255) PRIMARY KEY `Signature`)");
 
-        // Upgrade table is intentionally NOT created. cimipkg MSIs do not
-        // participate in major-upgrade handling — see the comment in Build()
-        // for why.
+        // Upgrade table. cimipkg uses it for one narrow purpose: detect and
+        // remove ANY other product that shares this product's (deterministic)
+        // UpgradeCode, so a build never piles a new ARP entry on top of the
+        // previous ones. It is NOT a classic version-gated major upgrade — the
+        // row matches every other version (see WriteUpgradeTable) so the most
+        // recent install always wins and exactly one product remains. The
+        // msidbUpgradeAttributesIgnoreRemoveFailure flag keeps a broken/
+        // unresolvable old package from ever aborting the new install, which is
+        // the field failure (#19) that previously motivated dropping this table.
+        db.Execute("CREATE TABLE `Upgrade` (`UpgradeCode` CHAR(38) NOT NULL, `VersionMin` CHAR(20), `VersionMax` CHAR(20), `Language` CHAR(255), `Attributes` LONG NOT NULL, `Remove` CHAR(255), `ActionProperty` CHAR(72) NOT NULL PRIMARY KEY `UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`)");
     }
 
     /// <summary>
@@ -462,14 +473,18 @@ public class MsiBuilder
         }
 
         // Standard MSI properties.
-        // UpgradeCode is set as metadata only — there is no Upgrade table, so it
-        // does not trigger FindRelatedProducts / RemoveExistingProducts. It is
-        // emitted because downstream readers (managedsoftwareupdate, cimistatus,
-        // ReportMate) read it via MsiPropertyReader for status correlation.
+        // UpgradeCode drives same-product supersession via the Upgrade table
+        // (FindRelatedProducts / RemoveExistingProducts) and is also read by
+        // downstream tooling (managedsoftwareupdate, cimistatus, ReportMate) via
+        // MsiPropertyReader for status correlation.
         SetProperty("ProductName", productName);
         SetProperty("ProductVersion", msiVersion);
         SetProperty("ProductCode", $"{{{productCode}}}");
         SetProperty("UpgradeCode", $"{{{upgradeCode}}}");
+        // SecureCustomProperties (which must list PREVIOUSVERSIONSINSTALLED for the
+        // upgrade machinery) is written once, after the user msi_properties loop
+        // below, so a package-supplied value is unioned rather than colliding on
+        // the Property table primary key.
         SetProperty("Manufacturer", buildInfo.Product.Developer ?? "Unknown");
         SetProperty("ProductLanguage", "1033");
         SetProperty("ALLUSERS", "1");
@@ -528,18 +543,61 @@ public class MsiBuilder
             SetProperty("CIMIAN_PKG_BUILD_INFO", encoded);
         }
 
-        // User-supplied msi_properties from build-info.yaml. There is no longer
-        // any cimipkg-managed SecureCustomProperties / PREVIOUSVERSIONSINSTALLED
-        // merge to do — the Upgrade table is gone, so neither is populated at
-        // install time — but a user can still pass either through verbatim if
-        // their package needs it.
+        // User-supplied msi_properties from build-info.yaml are written verbatim,
+        // with one exception: SecureCustomProperties must always include
+        // PREVIOUSVERSIONSINSTALLED — it is set by FindRelatedProducts and consumed
+        // by RemoveExistingProducts, and declaring it secure lets the value cross
+        // the UI→execute boundary intact and pass ICE validation. If a package also
+        // supplies SecureCustomProperties we union the two semicolon-delimited lists
+        // and emit a single Property row, rather than inserting the key twice and
+        // colliding on the Property table primary key.
+        var secureProps = new List<string> { "PREVIOUSVERSIONSINSTALLED" };
         if (buildInfo.MsiProperties != null)
         {
             foreach (var (key, value) in buildInfo.MsiProperties)
             {
+                if (string.Equals(key, "SecureCustomProperties", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var p in value.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                    {
+                        if (!secureProps.Contains(p, StringComparer.OrdinalIgnoreCase))
+                            secureProps.Add(p);
+                    }
+                    continue;
+                }
                 SetProperty(key, value);
             }
         }
+        SetProperty("SecureCustomProperties", string.Join(";", secureProps));
+    }
+
+    /// <summary>
+    /// Writes the single Upgrade row that drives same-product supersession.
+    /// FindRelatedProducts populates PREVIOUSVERSIONSINSTALLED from any other
+    /// installed product carrying this UpgradeCode; RemoveExistingProducts then
+    /// uninstalls them (early in the sequence — see WriteInstallSequence) so only
+    /// the build now installing remains.
+    ///
+    /// VersionMin='0.0.0' (exclusive) with an empty VersionMax matches every real
+    /// version, so this is deliberately not a version-gated upgrade: the most
+    /// recent install always wins regardless of the timestamp version it carries
+    /// (two builds can even share an MSI version when stamped in the same minute).
+    ///
+    /// Attributes = 4 (msidbUpgradeAttributesIgnoreRemoveFailure) | 256
+    /// (msidbUpgradeAttributesLanguagesExclusive, i.e. all languages). The
+    /// IgnoreRemoveFailure bit is load-bearing: if an old product's cached package
+    /// is missing or corrupt, its removal is skipped and the new install still
+    /// completes with exit 0 — never the silent /qn source-prompt abort that #19
+    /// removed this machinery to avoid.
+    /// </summary>
+    internal static void WriteUpgradeTable(Database db, Guid upgradeCode)
+    {
+        const int ignoreRemoveFailure = 4;
+        const int languagesExclusive = 256;
+        var attributes = ignoreRemoveFailure | languagesExclusive;
+        db.Execute(
+            "INSERT INTO `Upgrade` (`UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty`) " +
+            $"VALUES ('{{{upgradeCode}}}', '0.0.0', '', '', {attributes}, '', 'PREVIOUSVERSIONSINSTALLED')");
     }
 
     private static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
@@ -752,9 +810,7 @@ public class MsiBuilder
             db.Execute($"INSERT INTO `InstallExecuteSequence` (`Action`, `Condition`, `Sequence`) VALUES ('{EscSql(action)}', '{EscSql(condition ?? "")}', {sequence})");
         }
 
-        // Standard install sequence. FindRelatedProducts and RemoveExistingProducts
-        // are intentionally absent: cimipkg MSIs are stateless deployers and never
-        // try to remove a previously-installed product (see Build() for context).
+        // Standard install sequence.
         //
         // AppSearch MUST run before LaunchConditions so the REBOOTPENDING
         // property is populated before the launch condition evaluates it.
@@ -763,11 +819,35 @@ public class MsiBuilder
         // the condition sees an empty property and never fires.
         AddAction("AppSearch", null, 50);
         AddAction("LaunchConditions", null, 100);
+        // FindRelatedProducts populates PREVIOUSVERSIONSINSTALLED from the Upgrade
+        // table so RemoveExistingProducts (below) knows which older builds of this
+        // same product to uninstall. Standard placement is early, before costing.
+        AddAction("FindRelatedProducts", null, 200);
+        // Force a full reinstall whenever THIS exact product is already installed.
+        // BootstrapMate fires `msiexec /i` for every package on every run; without
+        // this, a same-ProductCode re-run lands as maintenance and CostFinalize
+        // marks the unchanged component "Action: Null", so InstallFiles is skipped.
+        // That skip — combined with a package preinstall that deletes its own
+        // keypath — is the preflight.ps1 present/absent oscillation. REINSTALL=ALL
+        // (with REINSTALLMODE=amus from WriteProperties) makes every re-run re-lay
+        // all files and registry, so the documented "always copies payload" contract
+        // is literally true for every package. It is gated on `Installed` so fresh
+        // installs (including the new-ProductCode build that supersedes older ones)
+        // are untouched, and on NOT REMOVE so uninstall is never affected. Must run
+        // before CostFinalize for the component action states to pick it up.
+        db.Execute("INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('SetReinstallAll', 51, 'REINSTALL', 'ALL', 0)");
+        AddAction("SetReinstallAll", "Installed AND NOT (REMOVE=\"ALL\")", 700);
         AddAction("CostInitialize", null, 800);
         AddAction("FileCost", null, 900);
         AddAction("CostFinalize", null, 1000);
         AddAction("InstallValidate", null, 1400);
         AddAction("InstallInitialize", null, 1500);
+        // RemoveExistingProducts runs early (right after InstallInitialize, before
+        // the new payload is laid down) so superseded builds are gone before
+        // ProcessComponents/InstallFiles, minimizing the window where two copies of
+        // the same product overlap. IgnoreRemoveFailure on the Upgrade row means a
+        // broken old package is skipped rather than aborting this install.
+        AddAction("RemoveExistingProducts", null, 1525);
         AddAction("ProcessComponents", null, 1600);
         AddAction("UnpublishFeatures", null, 1800);
 
@@ -809,11 +889,13 @@ public class MsiBuilder
         {
             // Postinstall fires on every install operation, skipped only on uninstall.
             AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6601);
-            // Uninstall fires only on standalone uninstall. The previous
-            // UPGRADINGPRODUCTCODE guard existed to skip this CA during the
-            // RemoveExistingProducts pass of a major upgrade; without the upgrade
-            // machinery there is no such pass, so the guard is unnecessary.
-            AddAction("CimianUninstall", "REMOVE=\"ALL\"", 6602);
+            // Uninstall fires only on a genuine standalone uninstall. The
+            // UPGRADINGPRODUCTCODE guard skips this CA when the product is being
+            // removed as the superseded side of an install (RemoveExistingProducts
+            // sets UPGRADINGPRODUCTCODE on the old product), so replacing an old
+            // build does not run its uninstall script — only an explicit removal
+            // does.
+            AddAction("CimianUninstall", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6602);
         }
     }
 
