@@ -9,7 +9,6 @@ permissions:
 
 env:
   DOTNET_VERSION: '10.0.x'
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   TZ: 'America/Vancouver'
 
 jobs:
@@ -22,16 +21,16 @@ jobs:
         arch: [win-x64, win-arm64]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           dotnet-quality: preview
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~\.nuget\packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props', '**/Directory.Packages.props') }}
@@ -69,7 +68,7 @@ jobs:
           Compress-Archive -Path publish/cimipkg.exe -DestinationPath "staging/cimipkg-${{ matrix.arch }}.zip" -Force
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cimipkg-${{ matrix.arch }}
           path: staging/cimipkg-${{ matrix.arch }}.zip
@@ -83,10 +82,10 @@ jobs:
       contents: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
           merge-multiple: true
