@@ -15,7 +15,6 @@ permissions:
 
 env:
   DOTNET_VERSION: '10.0.x'
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
   TZ: 'America/Vancouver'
 
 jobs:
@@ -24,16 +23,16 @@ jobs:
     timeout-minutes: 30
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+        uses: actions/setup-dotnet@v5
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
           dotnet-quality: preview
 
       - name: Cache NuGet packages
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: ~\.nuget\packages
           key: nuget-${{ runner.os }}-${{ hashFiles('**/*.csproj', '**/Directory.Build.props', '**/Directory.Packages.props') }}
@@ -53,7 +52,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: test-results
           path: ./TestResults/*.trx
