@@ -832,10 +832,17 @@ public class MsiBuilder
         // between runs, so that source is gone and SecureRepair aborts the whole
         // install with 1603 (or 1625 outside an elevated context). That is exactly
         // the "MSI maintenance/repair machinery" this tool is built to avoid.
-        // The "always copies payload" contract is instead honoured the stateless
-        // way: the payload is laid by a deferred custom action (CimianInstallPayload,
-        // see WriteScriptCustomActions / WriteInstallSequence) that runs on every
-        // install regardless of component state — never via the repair engine.
+        // What replaces it, without the repair engine:
+        //   * Scripts run on EVERY install. CimianPreinstall / CimianPostinstall are
+        //     custom actions gated only on install-vs-uninstall (NOT REMOVE="ALL"),
+        //     so the package's own logic executes on every msiexec /i, fresh or repeat.
+        //   * Payload is laid by the standard component-based InstallFiles action.
+        //     Each File carries a synthetic File.Version (the package version, see
+        //     WritePayloadTables) so a NEW build always overwrites whatever is on disk,
+        //     and supersede (RemoveExistingProducts) makes every new version a fresh
+        //     install. A byte-identical re-run of the SAME version is a maintenance
+        //     no-op for the files — they are already present — which is fine: nothing
+        //     changed, and we never invoke repair to force a redundant re-copy.
         AddAction("CostInitialize", null, 800);
         AddAction("FileCost", null, 900);
         AddAction("CostFinalize", null, 1000);

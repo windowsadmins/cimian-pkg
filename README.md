@@ -154,10 +154,12 @@ and `REINSTALL`:
   the repair aborts the whole install with **1603** (or **1625** out of an elevated
   context). That is exactly the stateful machinery this tool exists to avoid. **Do not
   reintroduce a `SetReinstallAll`/`REINSTALL` custom action.**
-- **Payload is authoritative per version.** Files carry a synthetic `File.Version` (the
-  package version) so a *new* build always overwrites whatever is on disk, and the payload
-  is always present after install. A byte-identical re-run of the *same* version is a
-  no-op copy (the files are already there); a new version always re-lays.
+- **Payload is authoritative per version.** "Copies the payload" is realised as *ensure
+  the payload is present*: files carry a synthetic `File.Version` (the package version) so a
+  *new* build always overwrites whatever is on disk, and supersede gives every new version a
+  fresh install. A byte-identical re-run of the *same* version is a harmless no-op (the files
+  are already there) — nothing changed, so nothing is re-copied, and we never invoke repair
+  to force a redundant copy.
 - **No duplicate ARP clutter.** A deterministic `UpgradeCode` (UUIDv5 of `identifier`,
   stable across versions) plus `FindRelatedProducts` + `RemoveExistingProducts` means each
   install supersedes any previously-installed build of the same product — so machines end
