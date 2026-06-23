@@ -823,20 +823,19 @@ public class MsiBuilder
         // table so RemoveExistingProducts (below) knows which older builds of this
         // same product to uninstall. Standard placement is early, before costing.
         AddAction("FindRelatedProducts", null, 200);
-        // Force a full reinstall whenever THIS exact product is already installed.
-        // BootstrapMate fires `msiexec /i` for every package on every run; without
-        // this, a same-ProductCode re-run lands as maintenance and CostFinalize
-        // marks the unchanged component "Action: Null", so InstallFiles is skipped.
-        // That skip — combined with a package preinstall that deletes its own
-        // keypath — is the preflight.ps1 present/absent oscillation. REINSTALL=ALL
-        // (with REINSTALLMODE=amus from WriteProperties) makes every re-run re-lay
-        // all files and registry, so the documented "always copies payload" contract
-        // is literally true for every package. It is gated on `Installed` so fresh
-        // installs (including the new-ProductCode build that supersedes older ones)
-        // are untouched, and on NOT REMOVE so uninstall is never affected. Must run
-        // before CostFinalize for the component action states to pick it up.
-        db.Execute("INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('SetReinstallAll', 51, 'REINSTALL', 'ALL', 0)");
-        AddAction("SetReinstallAll", "Installed AND NOT (REMOVE=\"ALL\")", 700);
+        // NOTE: cimipkg deliberately does NOT force REINSTALL=ALL on re-runs.
+        // An earlier attempt set REINSTALL=ALL here to make a same-ProductCode
+        // re-run re-lay payload — but REINSTALL is Windows Installer's *repair*
+        // path, and on any machine with SecureRepair active (default on modern
+        // Windows) the repair is validated against the original install source.
+        // BootstrapMate downloads each MSI to an ephemeral cache and clears it
+        // between runs, so that source is gone and SecureRepair aborts the whole
+        // install with 1603 (or 1625 outside an elevated context). That is exactly
+        // the "MSI maintenance/repair machinery" this tool is built to avoid.
+        // The "always copies payload" contract is instead honoured the stateless
+        // way: the payload is laid by a deferred custom action (CimianInstallPayload,
+        // see WriteScriptCustomActions / WriteInstallSequence) that runs on every
+        // install regardless of component state — never via the repair engine.
         AddAction("CostInitialize", null, 800);
         AddAction("FileCost", null, 900);
         AddAction("CostFinalize", null, 1000);
