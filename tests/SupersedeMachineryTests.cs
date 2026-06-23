@@ -6,13 +6,20 @@ namespace Cimian.Tests.Cimipkg;
 
 /// <summary>
 /// Contract tests for AB#3418 — cimipkg MSIs supersede older builds of the same
-/// product so ARP never accumulates copies, and always re-lay their payload on a
-/// re-install. This reverses #19 (NoUpgradeMachineryTests): the Upgrade table,
-/// FindRelatedProducts, and RemoveExistingProducts are now REQUIRED, with
-/// IgnoreRemoveFailure so a broken old package can never abort the new install.
-/// A SetReinstallAll property action forces a full reinstall when the product is
-/// already present so the payload always lands (no preflight.ps1-style toggle).
-/// These tests fail loudly if any of that machinery is dropped again.
+/// product so ARP never accumulates copies. The Upgrade table, FindRelatedProducts,
+/// and RemoveExistingProducts are REQUIRED, with IgnoreRemoveFailure so a broken old
+/// package can never abort the new install. These tests fail loudly if that
+/// supersede machinery is dropped.
+///
+/// They ALSO guard the opposite for repair: cimipkg is a stateless deployer and must
+/// NEVER force REINSTALL=ALL on a re-run. An earlier SetReinstallAll property action
+/// did exactly that to re-lay payload, but REINSTALL is Windows Installer's repair
+/// path — on any machine with SecureRepair active (default on modern Windows) the
+/// repair is validated against the original install source, which a managed client
+/// installing from an ephemeral cache no longer has, so the install aborts with 1603
+/// (SYSTEM) or 1625 (non-elevated). Scripts run on every install via custom actions;
+/// payload is authoritative per version. See README "Install model: stateless
+/// deployer". The no-REINSTALL tests below fail loudly if it is reintroduced.
 /// </summary>
 public class SupersedeMachineryTests
 {
@@ -135,16 +142,19 @@ public class SupersedeMachineryTests
 
     [Theory]
     [InlineData(true,  true)]
+    [InlineData(true,  false)]
+    [InlineData(false, true)]
     [InlineData(false, false)]
-    public void WriteInstallSequence_ForcesReinstall_BeforeCostFinalize(bool hasScripts, bool hasPayload)
+    public void WriteInstallSequence_NeverForcesReinstall(bool hasScripts, bool hasPayload)
     {
+        // Stateless deployer: cimipkg must NOT force REINSTALL=ALL on a re-run.
+        // REINSTALL is the repair path and triggers SecureRepair -> 1603/1625 on a
+        // managed client that installs from an ephemeral cache. Payload re-lay is
+        // handled by fresh-install + supersede on version bumps, not by repair.
         var msi = BuildSchemaAndSequenceMsi(hasScripts, hasPayload);
         try
         {
-            Assert.Contains("SetReinstallAll", ListInstallExecuteSequenceActions(msi));
-            // REINSTALL must be set before CostFinalize for the component action
-            // states to honor it; otherwise InstallFiles is skipped on a re-run.
-            Assert.True(SequenceOf(msi, "SetReinstallAll") < SequenceOf(msi, "CostFinalize"));
+            Assert.DoesNotContain("SetReinstallAll", ListInstallExecuteSequenceActions(msi));
         }
         finally
         {
@@ -153,20 +163,20 @@ public class SupersedeMachineryTests
     }
 
     [Fact]
-    public void SetReinstallAll_IsAPropertyAction_ForcingReinstallAll()
+    public void NoCustomAction_SetsTheReinstallProperty()
     {
+        // Guard against ANY custom action that sets the REINSTALL property (a
+        // reintroduced SetReinstallAll, or one under a different name). The repair
+        // engine must never be invoked by a cimipkg MSI.
         var msi = BuildSchemaAndSequenceMsi(hasScripts: true, hasPayload: true);
         try
         {
             using var db = new Database(msi, DatabaseOpenMode.ReadOnly);
             using var view = db.OpenView(
-                "SELECT `Type`, `Source`, `Target` FROM `CustomAction` WHERE `Action`='SetReinstallAll'");
+                "SELECT `Action` FROM `CustomAction` WHERE `Source`='REINSTALL'");
             view.Execute();
             using var rec = view.Fetch();
-            Assert.NotNull(rec);
-            Assert.Equal(51, rec!.GetInteger(1)); // Type 51 = set property
-            Assert.Equal("REINSTALL", rec.GetString(2));
-            Assert.Equal("ALL", rec.GetString(3));
+            Assert.Null(rec);
         }
         finally
         {

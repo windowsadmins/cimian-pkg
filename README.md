@@ -131,6 +131,46 @@ The default output format. Builds native Windows Installer packages via the DTF 
 - Scripts should stay 5.1-compatible, but `#Requires -Version 7` works when pwsh is installed
 - The resulting MSI can be installed by `msiexec`, MDM systems, or [sbin-installer](https://github.com/windowsadmins/sbin-installer)
 
+### Install model: stateless deployer (read this before touching MsiBuilder)
+
+cimipkg MSIs are **stateless deployers**, not managed MSI products. The contract is
+deliberately the same as `pkgbuild` + `/usr/sbin/installer` on macOS (the model
+[munki-pkg](https://github.com/rodchristiansen/munki-pkg) targets): **every time the
+package is installed, it runs the preinstall script (if present), copies the payload
+to its destination (if present), and runs the postinstall script (if present). That's
+it. Consistently, every install.**
+
+To honour that on Windows, cimipkg sets what Windows genuinely needs and **deliberately
+avoids Windows Installer's stateful machinery** — major-upgrade version gating, repair,
+and `REINSTALL`:
+
+- **Scripts run on every install.** preinstall/postinstall/uninstall are custom actions
+  conditioned only on install-vs-uninstall (`NOT REMOVE="ALL"` / `REMOVE="ALL"`), never
+  on component or version state — so they fire on every `msiexec /i`, fresh or repeat.
+- **No `REINSTALL` / no repair.** cimipkg never forces `REINSTALL=ALL` to re-lay payload.
+  `REINSTALL` is Windows Installer's *repair* path: on any machine with **SecureRepair**
+  active (default on modern Windows) the repair is validated against the original install
+  source, and a managed client that installs from an ephemeral cache won't have it — so
+  the repair aborts the whole install with **1603** (or **1625** out of an elevated
+  context). That is exactly the stateful machinery this tool exists to avoid. **Do not
+  reintroduce a `SetReinstallAll`/`REINSTALL` custom action.**
+- **Payload is authoritative per version.** "Copies the payload" is realised as *ensure
+  the payload is present*: files carry a synthetic `File.Version` (the package version) so a
+  *new* build always overwrites whatever is on disk, and supersede gives every new version a
+  fresh install. A byte-identical re-run of the *same* version is a harmless no-op (the files
+  are already there) — nothing changed, so nothing is re-copied, and we never invoke repair
+  to force a redundant copy.
+- **No duplicate ARP clutter.** A deterministic `UpgradeCode` (UUIDv5 of `identifier`,
+  stable across versions) plus `FindRelatedProducts` + `RemoveExistingProducts` means each
+  install supersedes any previously-installed build of the same product — so machines end
+  up with exactly one entry in Add/Remove Programs instead of dozens of stacked copies.
+  This is the *only* upgrade-table machinery cimipkg uses, and it exists solely to keep the
+  registration clean — it does **not** gate scripts or payload.
+
+Net: an install always performs the three steps and never invokes the maintenance/repair
+engine. If you change `MsiBuilder`, preserve this — any change must move *toward* "just
+runs the three steps every time," never toward MSI's stateful upgrade/repair behavior.
+
 ### Script mapping
 
 | Project script | MSI custom action |
