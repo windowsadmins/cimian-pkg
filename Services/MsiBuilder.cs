@@ -893,15 +893,30 @@ public class MsiBuilder
 
         if (hasScripts)
         {
+            // Postinstall and uninstall are deferred + no-impersonate (run as LocalSystem),
+            // so they MUST be sequenced between InstallInitialize (1500) and InstallFinalize
+            // (6600) — a deferred action scheduled after InstallFinalize is never written
+            // into the execute-sequence script and silently never runs. They sit just before
+            // InstallFinalize: all payload files are on disk (InstallFiles 4000) and the
+            // product is registered (RegisterProduct 6100), and running before the commit
+            // means a failing install-phase script rolls the whole install back cleanly
+            // rather than leaving a committed-but-misconfigured product.
+            //
+            // Each deferred action is preceded by its immediate Type 51 set-property
+            // companion (Set<Action>Data) that marshals INSTALLDIR/REMOVE/ProductVersion/
+            // ProductName into CustomActionData — the only property a deferred CA can read.
+            //
             // Postinstall fires on every install operation, skipped only on uninstall.
-            AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6601);
+            AddAction("SetCimianPostinstallData", "NOT (REMOVE=\"ALL\")", 6450);
+            AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6500);
             // Uninstall fires only on a genuine standalone uninstall. The
             // UPGRADINGPRODUCTCODE guard skips this CA when the product is being
             // removed as the superseded side of an install (RemoveExistingProducts
             // sets UPGRADINGPRODUCTCODE on the old product), so replacing an old
             // build does not run its uninstall script — only an explicit removal
             // does.
-            AddAction("CimianUninstall", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6602);
+            AddAction("SetCimianUninstallData", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6460);
+            AddAction("CimianUninstall", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6510);
         }
     }
 
@@ -942,23 +957,30 @@ public class MsiBuilder
         var uninstallScripts = Directory.GetFiles(scriptsDir, "uninstall*.ps1")
             .OrderBy(f => f).ToArray();
 
-        // Preinstall: immediate, before InstallInitialize — stops services/processes
+        // Preinstall: immediate, before InstallValidate — stops services/processes that
+        // hold payload files open so InstallValidate doesn't stall on a Files-In-Use check.
+        // It MUST be immediate (a deferred CA cannot run before InstallInitialize), which
+        // means it runs in the launching context — fine for the elevated fleet path
+        // (Cimian/SYSTEM, BootstrapMate). See WriteInstallSequence for the timing rationale.
         var preScript = preinstallScripts.Length > 0
             ? SignScriptContent(variableHeader + CombineScripts(preinstallScripts, envVars), buildInfo)
             : "# No preinstall scripts";
         WriteImmediateScriptAction(db, "CimianPreinstall", preScript);
 
-        // Postinstall: immediate, AFTER InstallFinalize — all files are on disk
+        // Postinstall: deferred + no-impersonate, scheduled just before InstallFinalize so
+        // it runs as LocalSystem on every launch path (double-click, msiexec, Cimian). An
+        // immediate postinstall ran in the launching user's token, so a non-elevated
+        // attended install could not write HKLM and failed with 1720.
         var postScript = postinstallScripts.Length > 0
             ? SignScriptContent(variableHeader + CombineScripts(postinstallScripts, envVars), buildInfo)
             : "# No postinstall scripts";
-        WriteImmediateScriptAction(db, "CimianPostinstall", postScript);
+        WriteDeferredScriptAction(db, "CimianPostinstall", postScript);
 
-        // Uninstall: immediate, AFTER InstallFinalize during removal
+        // Uninstall: deferred + no-impersonate, during removal.
         var uninstallScript = uninstallScripts.Length > 0
             ? SignScriptContent(variableHeader + CombineScripts(uninstallScripts, envVars), buildInfo)
             : "# No uninstall scripts";
-        WriteImmediateScriptAction(db, "CimianUninstall", uninstallScript);
+        WriteDeferredScriptAction(db, "CimianUninstall", uninstallScript);
     }
 
     /// <summary>
@@ -986,22 +1008,73 @@ public class MsiBuilder
     private static void WriteImmediateScriptAction(Database db, string actionName, string scriptContent)
     {
         var vbsStr = BuildScriptActionVbs(actionName, scriptContent);
-        // Type 38 = inline VBScript (Target column). Deliberately NOT +64
-        // (msidbCustomActionTypeContinue): a failing preinstall/postinstall
-        // script must fail the MSI so the managing client records a failed
-        // install instead of a phantom success that installchecks then refute
-        // forever (the WinAdminsAccount install-loop incident, June 2026).
-        // The VBS itself only raises for cimianPhase = "install", so uninstall
-        // scripts stay best-effort.
+        // Type 38 = inline VBScript (Target column), immediate. Used only for
+        // CimianPreinstall now (postinstall/uninstall are deferred — see
+        // WriteDeferredScriptAction). Deliberately NOT +64 (msidbCustomActionTypeContinue):
+        // a failing install-phase preinstall must fail the MSI so the managing client
+        // records a failed install instead of a phantom success that installchecks then
+        // refute forever (the WinAdminsAccount install-loop incident, June 2026). The VBS
+        // itself only raises for cimianPhase = "install".
         db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 38, '', '{EscSql(vbsStr)}', 0)");
+    }
+
+    /// <summary>
+    /// Write a deferred, no-impersonate Type 3110 VBScript custom action plus the Type 51
+    /// set-property companion that feeds it CustomActionData.
+    ///
+    /// Why deferred + no-impersonate instead of the immediate Type 38: an immediate custom
+    /// action runs in the security context of the process that launched the install. When a
+    /// cimipkg MSI is installed by an elevated launcher (Cimian/managedsoftwareupdate as
+    /// SYSTEM, an elevated BootstrapMate, or msiexec from an elevated prompt) that context is
+    /// already SYSTEM/admin, so an immediate postinstall could write HKLM and everything
+    /// worked. But a plain double-click in Explorer by a non-elevated user runs the immediate
+    /// custom action in the *user's* unelevated token even though the install itself elevates
+    /// — so a postinstall that writes HKLM (e.g. CimianAuth's credential setup) failed, and
+    /// once cimipkg started failing the install on a non-zero script exit that surfaced as
+    /// MSI error 1720 ("a script required for this install to complete could not be run"),
+    /// orphaning attended-provisioned devices. Deferred (msidbCustomActionTypeInScript, 1024)
+    /// + no-impersonate (msidbCustomActionTypeNoImpersonate, 2048) runs the script as
+    /// LocalSystem inside the install's elevated execute-sequence script, so it succeeds the
+    /// same way no matter how the MSI was launched.
+    ///
+    /// Type 3110 = 38 (the same inline-VBScript-in-Target base type as the immediate action)
+    /// + 1024 + 2048. Deliberately NOT +64 (msidbCustomActionTypeContinue): a failing
+    /// install-phase script must fail — and now cleanly roll back — the MSI, because the
+    /// deferred action runs before InstallFinalize commits.
+    /// </summary>
+    private static void WriteDeferredScriptAction(Database db, string actionName, string scriptContent)
+    {
+        var vbsStr = BuildScriptActionVbs(actionName, scriptContent, deferred: true);
+        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 3110, '', '{EscSql(vbsStr)}', 0)");
+
+        // Type 51 (set-property) companion: a deferred CA can only read the single
+        // CustomActionData property, whose name must match the deferred action. Stage the
+        // four values the VBS needs (INSTALLDIR for installer-type payload root, REMOVE for
+        // the install/uninstall phase, ProductVersion, ProductName for the sidecar log name)
+        // pipe-delimited. The Source column is the property to set (== the deferred action
+        // name); the Target column is formatted by MSI at run time so [INSTALLDIR] etc.
+        // expand to their resolved values. This must be sequenced before the deferred action
+        // (see WriteInstallSequence) so the property is set when MSI snapshots CustomActionData.
+        var setActionName = "Set" + actionName + "Data";
+        const string data = "[INSTALLDIR]|[REMOVE]|[ProductVersion]|[ProductName]";
+        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(setActionName)}', 51, '{EscSql(actionName)}', '{EscSql(data)}', 0)");
     }
 
     /// <summary>
     /// Build the VBScript body for a Cimian script custom action. Public so the test
     /// project can assert on the generated VBS without having to create an MSI database.
     /// </summary>
-    public static string BuildScriptActionVbs(string actionName, string scriptContent)
+    public static string BuildScriptActionVbs(string actionName, string scriptContent, bool deferred = false)
     {
+        // <paramref name="deferred"/> switches how the four MSI values the script needs
+        // (INSTALLDIR, REMOVE, ProductVersion, ProductName) are obtained. An immediate CA
+        // reads them straight off the running session via Session.Property(); a deferred CA
+        // runs in the elevated execute-sequence script where Session.Property() returns
+        // empty for everything except CustomActionData, so a companion Type 51 set-property
+        // CA marshals them pipe-delimited into CustomActionData and the VBS Splits them out.
+        // Deferred + no-impersonate is what lets the script run as LocalSystem regardless of
+        // how the MSI was launched (see WriteDeferredScriptAction).
+        //
         // actionName is interpolated directly into both VBS string literals and the
         // staged temp-file path, so reject anything that could break either surface.
         // cimipkg only ever passes the fixed values CimianPreinstall /
@@ -1047,27 +1120,50 @@ public class MsiBuilder
         var vbs = new StringBuilder(base64.Length + 4096);
         vbs.Append("On Error Resume Next\r\n");
         vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
-        vbs.Append("Dim cimianPhase, cimianRemove\r\n");
+        vbs.Append("Dim cimianPhase, cimianRemove, cimianInstallDir, cimianVersion, cimianProdName\r\n");
         vbs.Append("Dim q, cmdLine, logFile, logDir, logStream, logLine, lineCount, prodName, ch\r\n");
+        vbs.Append("Dim cimianData, cimianParts\r\n");
         vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
         vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
+        // Obtain the four values the script needs. A deferred CA cannot read arbitrary
+        // properties (Session.Property returns empty except for CustomActionData), so its
+        // companion Type 51 set-property CA stages them pipe-delimited into CustomActionData
+        // as INSTALLDIR|REMOVE|ProductVersion|ProductName — none of which can contain a '|'
+        // (Windows paths, the package version, and the sanitized product name never do, and
+        // REMOVE is only ever "ALL" or empty), so a positional Split round-trips safely.
+        if (deferred)
+        {
+            vbs.Append("cimianData = Session.Property(\"CustomActionData\")\r\n");
+            vbs.Append("cimianInstallDir = \"\" : cimianRemove = \"\" : cimianVersion = \"\" : cimianProdName = \"\"\r\n");
+            vbs.Append("cimianParts = Split(cimianData, \"|\")\r\n");
+            vbs.Append("If UBound(cimianParts) >= 0 Then cimianInstallDir = cimianParts(0)\r\n");
+            vbs.Append("If UBound(cimianParts) >= 1 Then cimianRemove = cimianParts(1)\r\n");
+            vbs.Append("If UBound(cimianParts) >= 2 Then cimianVersion = cimianParts(2)\r\n");
+            vbs.Append("If UBound(cimianParts) >= 3 Then cimianProdName = cimianParts(3)\r\n");
+        }
+        else
+        {
+            vbs.Append("cimianInstallDir = Session.Property(\"INSTALLDIR\")\r\n");
+            vbs.Append("cimianRemove = Session.Property(\"REMOVE\")\r\n");
+            vbs.Append("cimianVersion = Session.Property(\"ProductVersion\")\r\n");
+            vbs.Append("cimianProdName = Session.Property(\"ProductName\")\r\n");
+        }
         // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
         // surfaces the extraction dir - preinstall/postinstall scripts can read
         // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = Session.Property(\"INSTALLDIR\")\r\n");
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = cimianInstallDir\r\n");
         // Phase is just install vs uninstall — cimipkg MSIs do not participate
         // in major upgrades, so PREVIOUSVERSIONSINSTALLED / UPGRADINGPRODUCTCODE
         // are never populated and the prior "upgrade"/"fresh" branches never
         // fired meaningfully.
-        vbs.Append("cimianRemove = Session.Property(\"REMOVE\")\r\n");
         vbs.Append("If cimianRemove = \"ALL\" Then\r\n");
         vbs.Append("  cimianPhase = \"uninstall\"\r\n");
         vbs.Append("Else\r\n");
         vbs.Append("  cimianPhase = \"install\"\r\n");
         vbs.Append("End If\r\n");
         vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PHASE\") = cimianPhase\r\n");
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_VERSION\") = Session.Property(\"ProductVersion\")\r\n");
-        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & Session.Property(\"ProductVersion\")\r\n");
+        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_VERSION\") = cimianVersion\r\n");
+        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & cimianVersion\r\n");
         //
         // Resolve the PowerShell runtime at install time so the same cimipkg MSI
         // works on endpoints with or without PowerShell 7 installed:
@@ -1170,7 +1266,7 @@ public class MsiBuilder
         vbs.Append($"    If Not logStream.AtEndOfStream Then Session.Log \"{actionName} | ... output truncated at 200 lines\"\r\n");
         vbs.Append("    logStream.Close\r\n");
         // ProductName feeds a filename, so strip the characters NTFS rejects.
-        vbs.Append("    prodName = Session.Property(\"ProductName\")\r\n");
+        vbs.Append("    prodName = cimianProdName\r\n");
         vbs.Append("    For Each ch In Array(\"\\\", \"/\", \":\", \"*\", \"?\", q, \"<\", \">\", \"|\")\r\n");
         vbs.Append("      prodName = Replace(prodName, ch, \"_\")\r\n");
         vbs.Append("    Next\r\n");
