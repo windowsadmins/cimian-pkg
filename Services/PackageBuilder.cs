@@ -100,14 +100,21 @@ public class PackageBuilder
         // Determine if this is an installer package
         var isInstallerPackage = buildInfo.IsInstallerPackage || !hasPayloadFiles;
 
-        // Validate configuration (MSI and pkg handle empty install_location differently)
-        var buildingMsi = !options.BuildPkg && !options.BuildNupkg;
-        if (hasPayloadFiles && !isInstallerPackage && string.IsNullOrEmpty(buildInfo.InstallLocation)
-            && !buildingMsi)
+        // Validate configuration. An empty install_location with payload means "installer-type"
+        // — the payload is staged to a temp location and the scripts deploy it themselves via
+        // $payloadRoot (e.g. BlenderPack expanding an add-on into every installed Blender).
+        // MSI honours this by staging to TempFolder; the .pkg builder just bundles payload +
+        // scripts and lets sbin-installer stage and run them the same way — neither consumes
+        // install_location. Only the .nupkg payload-copy script (GeneratePayloadCopyScript)
+        // needs an explicit destination to copy into, so the requirement applies to it alone.
+        if (options.BuildNupkg && hasPayloadFiles && !isInstallerPackage
+            && string.IsNullOrEmpty(buildInfo.InstallLocation))
         {
             throw new InvalidOperationException(
                 "install_location must be specified when payload exists and the package is not an installer.");
         }
+
+        var buildingMsi = !options.BuildPkg && !options.BuildNupkg;
 
         // Parse and normalize version
         var packageFormat = buildingMsi ? "msi" : options.BuildNupkg ? "nupkg" : "pkg";

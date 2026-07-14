@@ -132,10 +132,12 @@ if ($env:installLocation -and -not $installLocation) { $installLocation = $env:i
         // Apply placeholder replacement
         var processed = ReplacePlaceholders(content, envVars);
 
-        // For PowerShell scripts in .pkg packages, inject variable mapping header
+        // For PowerShell scripts in .pkg packages, inject variable mapping header after any
+        // leading param() block so a script opening with [CmdletBinding()]/param() still parses
+        // (see InjectPowerShellHeader — the same 1720/1603 hazard as the MSI script actions).
         if (injectHeader && IsPowerShellScript(extension))
         {
-            processed = PowerShellVariableMappingHeader + processed;
+            processed = InjectPowerShellHeader(processed, PowerShellVariableMappingHeader);
             _logger.LogDebug("Injected variable mapping header into PowerShell script");
         }
 
@@ -266,6 +268,183 @@ if ($env:installLocation -and -not $installLocation) { $installLocation = $env:i
         }
 
         return combined.ToString();
+    }
+
+    /// <summary>
+    /// Prepends a variable header ($payloadRoot etc.) to a PowerShell script without
+    /// breaking a leading param() block.
+    ///
+    /// PowerShell requires param() to be the first *statement* in a script: only comments,
+    /// #Requires, using statements and attributes may precede it. Blindly concatenating
+    /// header + script therefore turns any script that opens with the entirely ordinary
+    ///
+    ///     [CmdletBinding()]
+    ///     param()
+    ///
+    /// into a parse error ("Unexpected token 'param'"), PowerShell exits non-zero before
+    /// running a single line, the script custom action fails, and the install dies with
+    /// MSI 1720 -> msiexec 1603. So instead of prepending unconditionally, we insert the
+    /// header immediately *after* the prologue and param block, where it is still ahead of
+    /// every statement the script actually executes.
+    /// </summary>
+    /// <param name="script">The (already combined) script body.</param>
+    /// <param name="header">Variable header to inject.</param>
+    /// <returns>Script with the header injected at a syntactically legal position.</returns>
+    public static string InjectPowerShellHeader(string script, string header)
+    {
+        if (string.IsNullOrEmpty(header)) return script;
+        if (string.IsNullOrEmpty(script)) return header;
+
+        var index = FindHeaderInsertionIndex(script);
+        if (index <= 0) return header + script;
+
+        var prefix = script.Substring(0, index);
+        var suffix = script.Substring(index);
+        if (!prefix.EndsWith("\n", StringComparison.Ordinal)) prefix += "\r\n";
+        if (suffix.Length > 0 && !suffix.StartsWith("\n", StringComparison.Ordinal)
+            && !suffix.StartsWith("\r", StringComparison.Ordinal))
+        {
+            return prefix + header + suffix;
+        }
+
+        return prefix + header + suffix.TrimStart('\r', '\n');
+    }
+
+    /// <summary>
+    /// Returns the offset at which a variable header may legally be inserted: just past a
+    /// leading param(...) block if the script has one, otherwise past any using statements
+    /// (which must stay first), otherwise 0 for "prepend at the top".
+    /// </summary>
+    private static int FindHeaderInsertionIndex(string s)
+    {
+        var i = 0;
+        var afterUsing = 0;
+
+        while (i < s.Length)
+        {
+            while (i < s.Length && char.IsWhiteSpace(s[i])) i++;
+            if (i >= s.Length) break;
+
+            // Block comment <# ... #>
+            if (s[i] == '<' && i + 1 < s.Length && s[i + 1] == '#')
+            {
+                var end = s.IndexOf("#>", i + 2, StringComparison.Ordinal);
+                i = end < 0 ? s.Length : end + 2;
+                continue;
+            }
+
+            // Line comment, including #Requires directives.
+            if (s[i] == '#')
+            {
+                while (i < s.Length && s[i] != '\n') i++;
+                continue;
+            }
+
+            // Attributes such as [CmdletBinding()] / [Diagnostics.CodeAnalysis.*].
+            if (s[i] == '[')
+            {
+                i = SkipBalanced(s, i, '[', ']');
+                continue;
+            }
+
+            // `using namespace ...` / `using module ...` must remain the first statements.
+            if (IsKeywordAt(s, i, "using"))
+            {
+                while (i < s.Length && s[i] != '\n') i++;
+                afterUsing = i;
+                continue;
+            }
+
+            if (IsKeywordAt(s, i, "param"))
+            {
+                var p = i + "param".Length;
+                while (p < s.Length && char.IsWhiteSpace(s[p])) p++;
+                if (p < s.Length && s[p] == '(')
+                {
+                    return SkipBalanced(s, p, '(', ')');
+                }
+            }
+
+            // First real statement: no param block to step over.
+            break;
+        }
+
+        return afterUsing;
+    }
+
+    /// <summary>
+    /// Returns the offset just past the closing delimiter matching the opener at
+    /// <paramref name="start"/>, skipping over quoted strings and comments so that a
+    /// bracket inside a string literal or a comment does not unbalance the scan.
+    /// </summary>
+    private static int SkipBalanced(string s, int start, char open, char close)
+    {
+        var depth = 0;
+        var i = start;
+
+        while (i < s.Length)
+        {
+            var c = s[i];
+
+            if (c == '\'' || c == '"')
+            {
+                var quote = c;
+                i++;
+                while (i < s.Length)
+                {
+                    // '' and "" are the escaped-quote forms; ` escapes inside "".
+                    if (s[i] == '`' && quote == '"' && i + 1 < s.Length) { i += 2; continue; }
+                    if (s[i] == quote)
+                    {
+                        if (i + 1 < s.Length && s[i + 1] == quote) { i += 2; continue; }
+                        i++;
+                        break;
+                    }
+                    i++;
+                }
+                continue;
+            }
+
+            if (c == '<' && i + 1 < s.Length && s[i + 1] == '#')
+            {
+                var end = s.IndexOf("#>", i + 2, StringComparison.Ordinal);
+                i = end < 0 ? s.Length : end + 2;
+                continue;
+            }
+
+            if (c == '#')
+            {
+                while (i < s.Length && s[i] != '\n') i++;
+                continue;
+            }
+
+            if (c == open) depth++;
+            else if (c == close)
+            {
+                depth--;
+                if (depth == 0) return i + 1;
+            }
+
+            i++;
+        }
+
+        // Unbalanced: fall back to "prepend at top" rather than splitting mid-construct.
+        return 0;
+    }
+
+    /// <summary>
+    /// True when <paramref name="word"/> appears at <paramref name="i"/> as a whole word
+    /// (case-insensitive), so `parameters` is not mistaken for `param`.
+    /// </summary>
+    private static bool IsKeywordAt(string s, int i, string word)
+    {
+        if (i + word.Length > s.Length) return false;
+        if (string.Compare(s, i, word, 0, word.Length, StringComparison.OrdinalIgnoreCase) != 0) return false;
+
+        var after = i + word.Length;
+        if (after < s.Length && (char.IsLetterOrDigit(s[after]) || s[after] == '-' || s[after] == '_')) return false;
+
+        return i == 0 || !char.IsLetterOrDigit(s[i - 1]);
     }
 
     /// <summary>

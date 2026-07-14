@@ -397,4 +397,101 @@ public class ScriptProcessorTests
     }
 
     #endregion
+
+    #region InjectPowerShellHeader
+
+    private const string Header = "$payloadRoot = $env:CIMIAN_INSTALLDIR\r\n";
+
+    /// <summary>
+    /// The BlenderPack shape. PowerShell requires param() to be the first statement, so a
+    /// header concatenated above [CmdletBinding()]/param() is a parse error — the script
+    /// exits non-zero before running, the custom action fails, and the install dies with
+    /// MSI 1720 -> msiexec 1603. The header must land *after* the param block.
+    /// </summary>
+    [Fact]
+    public void InjectPowerShellHeader_ScriptWithParamBlock_InsertsHeaderAfterParam()
+    {
+        const string script = "#Requires -Version 5.0\r\n\r\n[CmdletBinding()]\r\nparam()\r\n\r\nSet-StrictMode -Version Latest\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.True(result.IndexOf("param()", StringComparison.Ordinal)
+                    < result.IndexOf("$payloadRoot", StringComparison.Ordinal),
+            "header must come after param()");
+        Assert.True(result.IndexOf("$payloadRoot", StringComparison.Ordinal)
+                    < result.IndexOf("Set-StrictMode", StringComparison.Ordinal),
+            "header must still precede the first executable statement");
+    }
+
+    [Fact]
+    public void InjectPowerShellHeader_ScriptWithoutParamBlock_PrependsAtTop()
+    {
+        const string script = "Set-StrictMode -Version Latest\r\nWrite-Host 'hi'\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.StartsWith("$payloadRoot", result, StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// A ')' inside a string default must not be mistaken for the end of the param block.
+    /// </summary>
+    [Fact]
+    public void InjectPowerShellHeader_ParamDefaultContainingParens_FindsRealEnd()
+    {
+        const string script = "param(\r\n    [string]$Name = 'a (b) c'\r\n)\r\n\r\nWrite-Host $Name\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.True(result.IndexOf("$Name = 'a (b) c'", StringComparison.Ordinal)
+                    < result.IndexOf("$payloadRoot", StringComparison.Ordinal),
+            "header must come after the whole param block, not at the paren inside the string");
+        Assert.True(result.IndexOf("$payloadRoot", StringComparison.Ordinal)
+                    < result.IndexOf("Write-Host $Name", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public void InjectPowerShellHeader_BlockCommentBeforeParam_InsertsHeaderAfterParam()
+    {
+        const string script = "<#\r\n.SYNOPSIS\r\n  param() in a comment\r\n#>\r\n[CmdletBinding()]\r\nparam()\r\n\r\nWrite-Host 'go'\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.True(result.IndexOf("#>", StringComparison.Ordinal)
+                    < result.IndexOf("$payloadRoot", StringComparison.Ordinal));
+        Assert.True(result.IndexOf("$payloadRoot", StringComparison.Ordinal)
+                    < result.IndexOf("Write-Host 'go'", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// `using` statements must remain the first statements in the script.
+    /// </summary>
+    [Fact]
+    public void InjectPowerShellHeader_UsingStatements_HeaderGoesAfterThem()
+    {
+        const string script = "using namespace System.IO\r\n\r\nWrite-Host 'go'\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.True(result.IndexOf("using namespace", StringComparison.Ordinal)
+                    < result.IndexOf("$payloadRoot", StringComparison.Ordinal),
+            "using statements must stay first");
+        Assert.True(result.IndexOf("$payloadRoot", StringComparison.Ordinal)
+                    < result.IndexOf("Write-Host 'go'", StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// `$parameters = ...` starts with "param" but is not the param keyword.
+    /// </summary>
+    [Fact]
+    public void InjectPowerShellHeader_IdentifierStartingWithParam_TreatedAsStatement()
+    {
+        const string script = "$parameters = @{}\r\nWrite-Host 'go'\r\n";
+
+        var result = ScriptProcessor.InjectPowerShellHeader(script, Header);
+
+        Assert.StartsWith("$payloadRoot", result, StringComparison.Ordinal);
+    }
+
+    #endregion
 }
