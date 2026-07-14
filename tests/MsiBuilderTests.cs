@@ -213,6 +213,45 @@ public class MsiBuilderTests
         Assert.Contains("On Error GoTo 0", vbs);
     }
 
+    [Fact]
+    public void BuildScriptActionVbs_Deferred_ReadsPropertiesFromCustomActionData()
+    {
+        // A deferred custom action runs in the elevated execute-sequence script where
+        // Session.Property() returns empty for everything except CustomActionData. The
+        // companion Type 51 CA stages INSTALLDIR|REMOVE|ProductVersion|ProductName there, so
+        // the deferred VBS must parse CustomActionData and must NOT call Session.Property for
+        // those four values (it would silently get empty strings and mis-handle the payload
+        // root / phase / log name).
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0", deferred: true);
+
+        Assert.Contains("Session.Property(\"CustomActionData\")", vbs);
+        Assert.Contains("Split(cimianData, \"|\")", vbs);
+        Assert.DoesNotContain("Session.Property(\"INSTALLDIR\")", vbs);
+        Assert.DoesNotContain("Session.Property(\"REMOVE\")", vbs);
+        Assert.DoesNotContain("Session.Property(\"ProductVersion\")", vbs);
+        Assert.DoesNotContain("Session.Property(\"ProductName\")", vbs);
+        // Phase still derives from the (now marshaled) REMOVE value.
+        Assert.Contains("If cimianRemove = \"ALL\" Then", vbs);
+        // And the install-phase failure guard is unchanged.
+        Assert.Contains("If cimianPhase = \"install\" And rc <> 0 Then", vbs);
+        AssertAllLinesUnderLimit(vbs);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_Immediate_ReadsPropertiesFromSession()
+    {
+        // The immediate variant (preinstall) runs in the launching session and reads the
+        // properties directly — it must NOT depend on CustomActionData (no Type 51 companion
+        // stages it for an immediate action).
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPreinstall", "exit 0");
+
+        Assert.Contains("Session.Property(\"INSTALLDIR\")", vbs);
+        Assert.Contains("Session.Property(\"REMOVE\")", vbs);
+        Assert.Contains("Session.Property(\"ProductName\")", vbs);
+        Assert.DoesNotContain("Session.Property(\"CustomActionData\")", vbs);
+        AssertAllLinesUnderLimit(vbs);
+    }
+
     private static void AssertAllLinesUnderLimit(string vbs)
     {
         var lines = vbs.Replace("\r\n", "\n").Split('\n');
