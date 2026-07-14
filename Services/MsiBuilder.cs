@@ -963,7 +963,9 @@ public class MsiBuilder
         // means it runs in the launching context — fine for the elevated fleet path
         // (Cimian/SYSTEM, BootstrapMate). See WriteInstallSequence for the timing rationale.
         var preScript = preinstallScripts.Length > 0
-            ? SignScriptContent(variableHeader + CombineScripts(preinstallScripts, envVars), buildInfo)
+            ? SignScriptContent(
+                ScriptProcessor.InjectPowerShellHeader(
+                    CombineScripts(preinstallScripts, envVars), variableHeader), buildInfo)
             : "# No preinstall scripts";
         WriteImmediateScriptAction(db, "CimianPreinstall", preScript);
 
@@ -972,13 +974,17 @@ public class MsiBuilder
         // immediate postinstall ran in the launching user's token, so a non-elevated
         // attended install could not write HKLM and failed with 1720.
         var postScript = postinstallScripts.Length > 0
-            ? SignScriptContent(variableHeader + CombineScripts(postinstallScripts, envVars), buildInfo)
+            ? SignScriptContent(
+                ScriptProcessor.InjectPowerShellHeader(
+                    CombineScripts(postinstallScripts, envVars), variableHeader), buildInfo)
             : "# No postinstall scripts";
         WriteDeferredScriptAction(db, "CimianPostinstall", postScript);
 
         // Uninstall: deferred + no-impersonate, during removal.
         var uninstallScript = uninstallScripts.Length > 0
-            ? SignScriptContent(variableHeader + CombineScripts(uninstallScripts, envVars), buildInfo)
+            ? SignScriptContent(
+                ScriptProcessor.InjectPowerShellHeader(
+                    CombineScripts(uninstallScripts, envVars), variableHeader), buildInfo)
             : "# No uninstall scripts";
         WriteDeferredScriptAction(db, "CimianUninstall", uninstallScript);
     }
