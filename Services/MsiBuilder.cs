@@ -287,7 +287,7 @@ public class MsiBuilder
             if (hasScripts)
             {
                 _logger.LogDebug("Writing script custom actions...");
-                WriteScriptCustomActions(db, scriptsDir, envVars, installDir, buildInfo);
+                WriteScriptCustomActions(db, scriptsDir, envVars, installDir, buildInfo, payloadFiles);
             }
 
             _logger.LogDebug("Committing database...");
@@ -920,12 +920,63 @@ public class MsiBuilder
         }
     }
 
+    /// <summary>
+    /// Builds a PowerShell preamble that releases the file lock on any payload .exe the
+    /// MSI is about to replace: it stops scheduled tasks whose action runs the exe and
+    /// kills running instances located under %ProgramFiles% (or the x86 variant),
+    /// excluding the process tree running this install so it never kills the installer
+    /// (msiexec / managedsoftwareupdate / BootstrapMate) driving the CA. Emitted only when
+    /// the payload contains at least one .exe. Names are baked at build time.
+    /// </summary>
+    private static string BuildSelfUpdateLockRelease(IReadOnlyList<string> exeNames)
+    {
+        // PowerShell single-quoted string array literal of the payload exe names.
+        var literals = string.Join(",", exeNames.Select(n => "'" + n.Replace("'", "''") + "'"));
+        return
+            "# --- Cimian self-update lock release (auto-injected by cimipkg) ---\r\n" +
+            "$ErrorActionPreference = 'SilentlyContinue'\r\n" +
+            "$cimianPayloadExes = @(" + literals + ")\r\n" +
+            "$cimianSelfIds = New-Object System.Collections.Generic.HashSet[int]\r\n" +
+            "[void]$cimianSelfIds.Add($PID)\r\n" +
+            "try {\r\n" +
+            "    $walk = Get-CimInstance Win32_Process -Filter \"ProcessId=$PID\" -ErrorAction SilentlyContinue\r\n" +
+            "    while ($walk -and $walk.ParentProcessId -and $cimianSelfIds.Add([int]$walk.ParentProcessId)) {\r\n" +
+            "        $walk = Get-CimInstance Win32_Process -Filter \"ProcessId=$($walk.ParentProcessId)\" -ErrorAction SilentlyContinue\r\n" +
+            "    }\r\n" +
+            "} catch {}\r\n" +
+            "$cimianPf = [Environment]::GetFolderPath('ProgramFiles')\r\n" +
+            "$cimianPfx86 = ${env:ProgramFiles(x86)}\r\n" +
+            "foreach ($cimianExe in $cimianPayloadExes) {\r\n" +
+            "    $cimianBase = [System.IO.Path]::GetFileNameWithoutExtension($cimianExe)\r\n" +
+            "    try {\r\n" +
+            "        Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {\r\n" +
+            "            $_.Actions -and ($_.Actions.Execute -match [regex]::Escape($cimianExe))\r\n" +
+            "        } | ForEach-Object {\r\n" +
+            "            Stop-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue\r\n" +
+            "        }\r\n" +
+            "    } catch {}\r\n" +
+            "    try {\r\n" +
+            "        Get-Process -Name $cimianBase -ErrorAction SilentlyContinue | Where-Object {\r\n" +
+            "            -not $cimianSelfIds.Contains($_.Id) -and $_.Path -and (\r\n" +
+            "                ($cimianPf -and $_.Path.StartsWith($cimianPf, [System.StringComparison]::OrdinalIgnoreCase)) -or\r\n" +
+            "                ($cimianPfx86 -and $_.Path.StartsWith($cimianPfx86, [System.StringComparison]::OrdinalIgnoreCase))\r\n" +
+            "            )\r\n" +
+            "        } | ForEach-Object {\r\n" +
+            "            try { [void]$_.CloseMainWindow() } catch {}\r\n" +
+            "            Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue\r\n" +
+            "        }\r\n" +
+            "    } catch {}\r\n" +
+            "}\r\n" +
+            "# --- end Cimian self-update lock release ---\r\n\r\n";
+    }
+
     private void WriteScriptCustomActions(
         Database db,
         string scriptsDir,
         Dictionary<string, string> envVars,
         string installDir,
-        BuildInfo buildInfo)
+        BuildInfo buildInfo,
+        IReadOnlyList<string> payloadFiles)
     {
         // Inject $payloadRoot so scripts can find staged files — matching sbin-installer behavior.
         // For installer-type (TempFolder), we can't hardcode the path — it resolves at install time.
@@ -962,10 +1013,39 @@ public class MsiBuilder
         // It MUST be immediate (a deferred CA cannot run before InstallInitialize), which
         // means it runs in the launching context — fine for the elevated fleet path
         // (Cimian/SYSTEM, BootstrapMate). See WriteInstallSequence for the timing rationale.
-        var preScript = preinstallScripts.Length > 0
+        // Generic self-update lock release: every cimipkg MSI that ships an .exe in its
+        // payload gets an auto-injected preamble that stops matching scheduled tasks and
+        // kills the running copy of each payload .exe (scoped to %ProgramFiles%, never the
+        // installer's own process tree) BEFORE payload copy. Without it, a self-updating
+        // tool whose binary is held open by its scheduled task (ReportMate's
+        // managedreportsrunner.exe, CimianPreflight, CimianAuth, NightlyBootstrap) has its
+        // replacement deferred by MoveFileEx to the next reboot: ARP/receipt advance but the
+        // on-disk .exe stays stale and the item loops forever in ReportMate (AB#3709). This
+        // runs on every delivery path because it is embedded in the MSI as the immediate
+        // CimianPreinstall custom action (sequenced before InstallValidate).
+        var payloadExeNames = payloadFiles
+            .Where(f => f.EndsWith(".exe", StringComparison.OrdinalIgnoreCase))
+            .Select(Path.GetFileName)
+            .Where(n => !string.IsNullOrEmpty(n))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        var lockRelease = payloadExeNames.Length > 0
+            ? BuildSelfUpdateLockRelease(payloadExeNames!)
+            : string.Empty;
+
+        string? preBody = null;
+        if (preinstallScripts.Length > 0)
+        {
+            preBody = lockRelease + CombineScripts(preinstallScripts, envVars);
+        }
+        else if (lockRelease.Length > 0)
+        {
+            preBody = lockRelease;
+        }
+
+        var preScript = preBody != null
             ? SignScriptContent(
-                ScriptProcessor.InjectPowerShellHeader(
-                    CombineScripts(preinstallScripts, envVars), variableHeader), buildInfo)
+                ScriptProcessor.InjectPowerShellHeader(preBody, variableHeader), buildInfo)
             : "# No preinstall scripts";
         WriteImmediateScriptAction(db, "CimianPreinstall", preScript);
 
