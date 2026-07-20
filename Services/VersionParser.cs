@@ -31,6 +31,12 @@ public static class VersionParser
         @"^(\d+)(?:\.(\d+))?(?:\.(\d+))?(?:\.(\d+))?$",
         RegexOptions.Compiled);
 
+    // A CalVer year lives in this range. A 4-digit major OUTSIDE it (e.g. Unity's
+    // 6000.x scheme) is not a date at all and must fall through to semver parsing
+    // rather than being rejected as an "out of range year".
+    private const int MinCalendarYear = 2000;
+    private const int MaxCalendarYear = 2100;
+
     /// <summary>
     /// Parses a version string and returns both original and normalized versions.
     /// </summary>
@@ -47,9 +53,13 @@ public static class VersionParser
 
         version = version.Trim();
 
-        // Check for date-based version (YYYY.MM.DD or YYYY.MM.DD.revision)
+        // Check for date-based version (YYYY.MM.DD or YYYY.MM.DD.revision).
+        // Only claim it as a date when the 4-digit major is a plausible calendar
+        // year; otherwise (e.g. Unity's 6000.5.4) fall through to semver parsing.
+        // A real year with a bad month/day still flows into ParseDateVersion and
+        // is rejected there, preserving date-typo detection.
         var dateMatch = DateVersionPattern.Match(version);
-        if (dateMatch.Success)
+        if (dateMatch.Success && IsPlausibleCalendarYear(dateMatch.Groups[1].Value))
         {
             return ParseDateVersion(dateMatch, packageFormat);
         }
@@ -84,10 +94,12 @@ public static class VersionParser
         var day = int.Parse(match.Groups[3].Value);
         var revision = match.Groups[4].Success ? int.Parse(match.Groups[4].Value) : 0;
 
-        // Validate date components
-        if (year < 2000 || year > 2100)
+        // Validate date components. The year gate is normally handled by the
+        // IsPlausibleCalendarYear check in Parse() before we get here; kept as a
+        // defensive guard for any direct caller.
+        if (year < MinCalendarYear || year > MaxCalendarYear)
         {
-            throw new ArgumentException($"Year {year} is out of valid range (2000-2100).");
+            throw new ArgumentException($"Year {year} is out of valid range ({MinCalendarYear}-{MaxCalendarYear}).");
         }
         if (month < 1 || month > 12)
         {
@@ -204,12 +216,23 @@ public static class VersionParser
     }
 
     /// <summary>
+    /// Returns true when the captured 4-digit major is a plausible calendar year
+    /// (2000-2100). Used to distinguish a genuine YYYY.MM.DD date from a semver
+    /// that merely has a 4-digit major component (e.g. Unity 6000.x).
+    /// </summary>
+    private static bool IsPlausibleCalendarYear(string yearDigits)
+        => int.TryParse(yearDigits, out var year)
+           && year >= MinCalendarYear
+           && year <= MaxCalendarYear;
+
+    /// <summary>
     /// Checks if a version string looks like a date-based version.
     /// </summary>
     public static bool IsDateBasedVersion(string version)
     {
         if (string.IsNullOrWhiteSpace(version)) return false;
-        return DateVersionPattern.IsMatch(version.Trim());
+        var match = DateVersionPattern.Match(version.Trim());
+        return match.Success && IsPlausibleCalendarYear(match.Groups[1].Value);
     }
 
     /// <summary>
