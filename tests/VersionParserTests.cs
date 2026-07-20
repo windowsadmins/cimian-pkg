@@ -67,6 +67,22 @@ public class VersionParserTests
     }
 
     [Theory]
+    // A 4-digit major outside the 2000-2100 calendar-year range is a semver, not a
+    // date. Unity ships 6000.x ("Unity 6"); cimipkg used to reject these as an
+    // "out of valid range" year. They must parse as ordinary semvers.
+    [InlineData("6000.5.4", "6000.5.4", "6000.5.4")]
+    [InlineData("6000.5.4.2", "6000.5.4.2", "6000.5.4.2")]
+    [InlineData("1000.2.3", "1000.2.3", "1000.2.3")]
+    public void Parse_FourDigitMajorOutsideYearRange_ParsesAsSemVer(string input, string expectedOriginal, string expectedNormalized)
+    {
+        var result = VersionParser.Parse(input, "pkg");
+
+        Assert.Equal(expectedOriginal, result.OriginalVersion);
+        Assert.Equal(expectedNormalized, result.NormalizedVersion);
+        Assert.False(result.IsDateBased);
+    }
+
+    [Theory]
     [InlineData("1.0.0-alpha", "1.0.0-alpha", "1.0.0-alpha")]
     [InlineData("1.0.0-beta.1", "1.0.0-beta.1", "1.0.0-beta.1")]
     [InlineData("2.0.0-rc.1", "2.0.0-rc.1", "2.0.0-rc.1")]
