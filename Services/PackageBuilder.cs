@@ -699,7 +699,7 @@ exit $LASTEXITCODE
         return buildInfo;
     }
 
-    private Dictionary<string, string> LoadEnvironmentVariables(string projectDir, string? envFilePath)
+    internal Dictionary<string, string> LoadEnvironmentVariables(string projectDir, string? envFilePath)
     {
         var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
@@ -733,6 +733,23 @@ exit $LASTEXITCODE
             }
 
             _logger.LogDebug("Loaded {Count} variables from {EnvFile}", envVars.Count, envFilePath);
+        }
+
+        // Fall back to the process environment for any variable the .env file did
+        // not provide, matching BuildInfo.DoSubstitutions' resolution order (.env
+        // takes precedence, the process environment fills the rest). Without this,
+        // ${VAR} placeholders in scripts resolve ONLY from a .env file -- a silent
+        // no-op in CI, where secrets are injected as environment variables rather
+        // than a committed .env. .env still wins, so existing builds are unchanged.
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            var key = entry.Key?.ToString();
+            if (string.IsNullOrEmpty(key) || envVars.ContainsKey(key))
+            {
+                continue;
+            }
+
+            envVars[key] = entry.Value?.ToString() ?? string.Empty;
         }
 
         return envVars;
