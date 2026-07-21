@@ -37,8 +37,10 @@ public class ScriptProcessorTests
     }
 
     [Fact]
-    public void ReplacePlaceholders_DollarSignSyntax_ReplacesCorrectly()
+    public void ReplacePlaceholders_BareDollarSyntax_NotReplaced()
     {
+        // Bare $VAR is ordinary PowerShell — it must never be treated as a
+        // placeholder, even when a matching env var exists.
         var content = "Value: $MY_VAR and $OTHER_VAR";
         var envVars = new Dictionary<string, string>
         {
@@ -48,11 +50,11 @@ public class ScriptProcessorTests
 
         var result = _processor.ReplacePlaceholders(content, envVars);
 
-        Assert.Equal("Value: 123 and 456", result);
+        Assert.Equal(content, result);
     }
 
     [Fact]
-    public void ReplacePlaceholders_MixedSyntax_ReplacesAll()
+    public void ReplacePlaceholders_MixedSyntax_ReplacesOnlyBraced()
     {
         var content = "${VAR1} and $VAR2";
         var envVars = new Dictionary<string, string>
@@ -63,7 +65,57 @@ public class ScriptProcessorTests
 
         var result = _processor.ReplacePlaceholders(content, envVars);
 
-        Assert.Equal("First and Second", result);
+        Assert.Equal("First and $VAR2", result);
+    }
+
+    [Fact]
+    public void ReplacePlaceholders_PowerShellParamBlock_Untouched()
+    {
+        // Field incident 2026-07-21: with process-env fallback, bare-$ matching
+        // rewrote param([string]$Path) into the build agent's PATH value,
+        // producing a ParserError and a fleet-wide MSI 1603.
+        var content = "param([string]$Path)\nif (-not (Test-Path $Path)) { return $true }";
+        var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PATH"] = @"C:\Program Files\PowerShell\7;C:\Users\agent\bin"
+        };
+
+        var result = _processor.ReplacePlaceholders(content, envVars);
+
+        Assert.Equal(content, result);
+    }
+
+    [Fact]
+    public void ReplacePlaceholders_CaseInsensitiveEnvCollision_Untouched()
+    {
+        // Field incident 2026-07-21: $azureTenantId matched the pipeline's
+        // AzureTenantId variable case-insensitively and was replaced everywhere,
+        // including the left side of its own assignment.
+        var content = "$azureTenantId = \"TENANT_ID\"";
+        var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["AZURETENANTID"] = "d22686a0-c1be-48e0-8f91-5bdd033f7dad"
+        };
+
+        var result = _processor.ReplacePlaceholders(content, envVars);
+
+        Assert.Equal(content, result);
+    }
+
+    [Fact]
+    public void ReplacePlaceholders_EnvPrefixedBracedVariable_Untouched()
+    {
+        // ${env:Path} is legal PowerShell; the ':' keeps it outside the
+        // placeholder grammar and it must survive verbatim.
+        var content = "Write-Host ${env:Path}";
+        var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["PATH"] = @"C:\clobbered"
+        };
+
+        var result = _processor.ReplacePlaceholders(content, envVars);
+
+        Assert.Equal(content, result);
     }
 
     [Fact]
