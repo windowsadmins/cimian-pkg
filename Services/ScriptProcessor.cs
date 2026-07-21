@@ -16,9 +16,15 @@ public class ScriptProcessor
 {
     private readonly ILogger<ScriptProcessor> _logger;
 
-    // Placeholder pattern matches ${VAR_NAME} or $VAR_NAME
+    // Placeholder pattern matches ${VAR_NAME} ONLY — never bare $VAR_NAME.
+    // Bare-$ matching is indistinguishable from ordinary PowerShell variables:
+    // combined with process-environment fallback it rewrote $Path/$azureTenantId
+    // etc. with build-agent values at pack time, corrupting every embedded
+    // script into a 1603 on install (field incident 2026-07-21). The braced
+    // form is the documented placeholder contract and collides with nothing
+    // scripts normally write ($env:X and ${env:X} contain ':' so never match).
     private static readonly Regex PlaceholderPattern = new(
-        @"\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)",
+        @"\$\{([A-Za-z_][A-Za-z0-9_]*)\}",
         RegexOptions.Compiled);
 
     // YAML-safe placeholder pattern (only ${VAR_NAME} to avoid conflicts with YAML syntax)
@@ -73,8 +79,7 @@ if ($env:installLocation -and -not $installLocation) { $installLocation = $env:i
 
         return PlaceholderPattern.Replace(content, match =>
         {
-            // Get the variable name from either ${VAR} or $VAR pattern
-            var varName = match.Groups[1].Success ? match.Groups[1].Value : match.Groups[2].Value;
+            var varName = match.Groups[1].Value;
 
             if (envVars.TryGetValue(varName, out var value))
             {
