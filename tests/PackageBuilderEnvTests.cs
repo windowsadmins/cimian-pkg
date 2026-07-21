@@ -68,4 +68,22 @@ public class PackageBuilderEnvTests
             Directory.Delete(dir, true);
         }
     }
+
+    [Fact]
+    public void LoadEnvironmentVariables_IgnoresUnprefixedProcessVariables()
+    {
+        var name = "UNPREFIXED_TEST_ENV_" + Guid.NewGuid().ToString("N");
+        var dir = MakeEmptyProjectDir();
+        Environment.SetEnvironmentVariable(name, "should-not-appear");
+        try
+        {
+            var vars = MakeBuilder().LoadEnvironmentVariables(dir, null);
+            Assert.False(vars.ContainsKey(name));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, null);
+            Directory.Delete(dir, true);
+        }
+    }
 }
