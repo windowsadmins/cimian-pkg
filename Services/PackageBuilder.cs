@@ -699,6 +699,10 @@ exit $LASTEXITCODE
         return buildInfo;
     }
 
+    /// Prefix a process-environment variable must carry to be merged into script
+    /// placeholder substitution, mirroring munki-pkg's MUNKIPKG_ namespacing.
+    internal const string SystemEnvPrefix = "CIMIPKG_";
+
     internal Dictionary<string, string> LoadEnvironmentVariables(string projectDir, string? envFilePath)
     {
         var envVars = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -735,16 +739,19 @@ exit $LASTEXITCODE
             _logger.LogDebug("Loaded {Count} variables from {EnvFile}", envVars.Count, envFilePath);
         }
 
-        // Fall back to the process environment for any variable the .env file did
-        // not provide, matching BuildInfo.DoSubstitutions' resolution order (.env
-        // takes precedence, the process environment fills the rest). Without this,
-        // ${VAR} placeholders in scripts resolve ONLY from a .env file -- a silent
-        // no-op in CI, where secrets are injected as environment variables rather
-        // than a committed .env. .env still wins, so existing builds are unchanged.
+        // Fall back to CIMIPKG_-prefixed process-environment variables for any key
+        // the .env file did not provide. Namespacing (mirroring munki-pkg's MUNKIPKG_)
+        // keeps arbitrary environment variables -- tokens, credentials, PATH -- from
+        // leaking into scripts, while still letting CI inject values as env vars
+        // instead of a committed .env. The prefix is retained in the key, so a
+        // ${CIMIPKG_FOO} placeholder resolves from a CIMIPKG_FOO env var. .env still
+        // wins on conflict, so existing .env-based builds are unchanged.
         foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
             var key = entry.Key?.ToString();
-            if (string.IsNullOrEmpty(key) || envVars.ContainsKey(key))
+            if (string.IsNullOrEmpty(key)
+                || !key.StartsWith(SystemEnvPrefix, StringComparison.Ordinal)
+                || envVars.ContainsKey(key))
             {
                 continue;
             }
