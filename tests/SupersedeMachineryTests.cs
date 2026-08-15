@@ -5,7 +5,7 @@ using Xunit;
 namespace Cimian.Tests.Cimipkg;
 
 /// <summary>
-/// Contract tests for AB#3418 — cimipkg MSIs supersede older builds of the same
+/// Contract tests for — cimipkg MSIs supersede older builds of the same
 /// product so ARP never accumulates copies. The Upgrade table, FindRelatedProducts,
 /// and RemoveExistingProducts are REQUIRED, with IgnoreRemoveFailure so a broken old
 /// package can never abort the new install. These tests fail loudly if that

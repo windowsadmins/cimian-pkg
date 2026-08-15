@@ -1020,7 +1020,7 @@ public class MsiBuilder
         // tool whose binary is held open by its scheduled task (ReportMate's
         // managedreportsrunner.exe, CimianPreflight, CimianAuth, NightlyBootstrap) has its
         // replacement deferred by MoveFileEx to the next reboot: ARP/receipt advance but the
-        // on-disk .exe stays stale and the item loops forever in ReportMate (AB#3709). This
+        // on-disk .exe stays stale and the item loops forever in ReportMate. This
         // runs on every delivery path because it is embedded in the MSI as the immediate
         // CimianPreinstall custom action (sequenced before InstallValidate).
         var payloadExeNames = payloadFiles
