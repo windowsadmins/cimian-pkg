@@ -183,18 +183,45 @@ public class MsiBuilderTests
         // The script runs hidden under msiexec, so without redirection its
         // output is lost forever. The custom action must route stdout+stderr
         // to a sidecar log, echo it into Session.Log, and persist a copy under
-        // ManagedInstalls\Logs for endpoint tooling to surface.
+        // ManagedInstalls\logs for endpoint tooling to surface.
         var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
 
         Assert.Contains("logFile = tmpFile & \".log\"", vbs);
         Assert.Contains("2>&1", vbs);
         Assert.Contains("\\ManagedInstalls", vbs);
-        Assert.Contains("cimipkg-", vbs);
         // ProductName feeds a filename and must be sanitized first.
         Assert.Contains("prodName = Replace(prodName, ch, \"_\")", vbs);
         // The temp log must survive a failed persistence copy (output would
         // otherwise be lost), so deletion is gated on CopyFile succeeding.
         Assert.Contains("If Err.Number = 0 Then", vbs);
+    }
+
+    [Fact]
+    public void BuildScriptActionVbs_PersistsLogUnderPerPackageDirectory()
+    {
+        // The logs root belongs to the managing client's session tree. Sidecar
+        // logs go in logs\packages\<ProductName>\, one directory per package,
+        // so the root stays readable and retention can drop a retired package
+        // in one move.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        Assert.Contains("logDir = logDir & \"\\logs\"", vbs);
+        Assert.Contains("logDir = logDir & \"\\packages\"", vbs);
+        Assert.Contains("logDir = logDir & \"\\\" & prodName", vbs);
+        Assert.Contains("fso.CopyFile logFile, logDir & \"\\postinstall.log\", True", vbs);
+        // The old flat name must be gone - it is what made the logs root
+        // unreadable in the first place.
+        Assert.DoesNotContain("\\cimipkg-\" & prodName", vbs);
+    }
+
+    [Theory]
+    [InlineData("CimianPreinstall", "preinstall")]
+    [InlineData("CimianPostinstall", "postinstall")]
+    [InlineData("CimianUninstall", "uninstall")]
+    [InlineData("SomethingElse", "somethingelse")]
+    public void ScriptLogName_DropsCimianPrefixAndLowercases(string actionName, string expected)
+    {
+        Assert.Equal(expected, MsiBuilder.ScriptLogName(actionName));
     }
 
     [Fact]
