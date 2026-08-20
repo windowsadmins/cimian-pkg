@@ -1180,6 +1180,23 @@ public class MsiBuilder
     }
 
     /// <summary>
+    /// Log file name for a script custom action's captured output, written inside that
+    /// package's own directory under <c>ManagedInstalls\logs\packages\</c>. The custom
+    /// action names carry a "Cimian" prefix to keep them distinct in the MSI's
+    /// CustomAction table; the directory already names the package, so the log drops the
+    /// prefix and reads as <c>preinstall.log</c> / <c>postinstall.log</c> /
+    /// <c>uninstall.log</c>.
+    /// </summary>
+    internal static string ScriptLogName(string actionName)
+    {
+        const string prefix = "Cimian";
+        var name = actionName.StartsWith(prefix, StringComparison.Ordinal)
+            ? actionName[prefix.Length..]
+            : actionName;
+        return name.ToLowerInvariant();
+    }
+
+    /// <summary>
     /// Build the VBScript body for a Cimian script custom action. Public so the test
     /// project can assert on the generated VBS without having to create an MSI database.
     /// </summary>
@@ -1389,15 +1406,26 @@ public class MsiBuilder
         vbs.Append("    For Each ch In Array(\"\\\", \"/\", \":\", \"*\", \"?\", q, \"<\", \">\", \"|\")\r\n");
         vbs.Append("      prodName = Replace(prodName, ch, \"_\")\r\n");
         vbs.Append("    Next\r\n");
+        // One directory per package under logs\packages\, rather than a flat
+        // "cimipkg-<product>-<action>.log" per package-and-action at the logs
+        // root. The root is shared with the managing client's own session tree,
+        // and a few dozen never-expiring sidecar logs there make it unreadable.
+        // A per-package directory also gives log retention a unit it can drop
+        // whole once a package is retired.
+        //
         // CreateFolder cannot create nested paths, so build each level. Failures
         // here (and in CopyFile) are non-fatal: Session.Log already has the
         // output, and the temp log is only removed once the copy succeeded.
         vbs.Append("    logDir = ws.ExpandEnvironmentStrings(\"%ProgramData%\") & \"\\ManagedInstalls\"\r\n");
         vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
-        vbs.Append("    logDir = logDir & \"\\Logs\"\r\n");
+        vbs.Append("    logDir = logDir & \"\\logs\"\r\n");
+        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
+        vbs.Append("    logDir = logDir & \"\\packages\"\r\n");
+        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
+        vbs.Append("    logDir = logDir & \"\\\" & prodName\r\n");
         vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
         vbs.Append("    Err.Clear\r\n");
-        vbs.Append($"    fso.CopyFile logFile, logDir & \"\\cimipkg-\" & prodName & \"-{actionName}.log\", True\r\n");
+        vbs.Append($"    fso.CopyFile logFile, logDir & \"\\{ScriptLogName(actionName)}.log\", True\r\n");
         vbs.Append("    If Err.Number = 0 Then\r\n");
         vbs.Append("      fso.DeleteFile logFile\r\n");
         vbs.Append("    Else\r\n");
