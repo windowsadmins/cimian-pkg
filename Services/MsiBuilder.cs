@@ -600,7 +600,7 @@ public class MsiBuilder
             $"VALUES ('{{{upgradeCode}}}', '0.0.0', '', '', {attributes}, '', 'PREVIOUSVERSIONSINSTALLED')");
     }
 
-    private static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
+    internal static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
     {
         db.Execute("INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('TARGETDIR', '', 'SourceDir')");
 
@@ -646,6 +646,16 @@ public class MsiBuilder
         // Each path segment is a separate directory entry (MSI DefaultDir can't contain backslashes)
         var segments = subPath.Split(['\\', '/'], StringSplitOptions.RemoveEmptyEntries);
         var currentParent = parentDirId;
+
+        // An install_location that is exactly the known-folder root has no path
+        // segments to turn into INSTALLDIR. Feature, Component, and custom-action
+        // rows still reference INSTALLDIR, so omitting it leaves a dangling
+        // Directory_Parent and Windows Installer rejects the MSI with error 2705.
+        if (segments.Length == 0)
+        {
+            db.Execute($"INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('INSTALLDIR', '{EscSql(parentDirId)}', '.')");
+            return;
+        }
 
         for (int i = 0; i < segments.Length; i++)
         {

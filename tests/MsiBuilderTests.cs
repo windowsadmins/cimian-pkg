@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Cimian.CLI.Cimipkg.Services;
+using WixToolset.Dtf.WindowsInstaller;
 using Xunit;
 
 namespace Cimian.Tests.Cimipkg;
@@ -25,6 +26,53 @@ public class MsiBuilderTests
     // safety margin of 1000 chars to leave headroom for the `b64 = b64 & "..."`
     // wrapper overhead.
     private const int VbsPerLineSafeLimit = 1000;
+
+    [Fact]
+    public void WriteDirectoryTable_KnownFolderRoot_EmitsValidInstallDir()
+    {
+        var msi = Path.Combine(Path.GetTempPath(), $"cimipkg-directory-{Guid.NewGuid():N}.msi");
+        try
+        {
+            using (var db = new Database(msi, DatabaseOpenMode.Create))
+            {
+                MsiBuilder.CreateTables(db);
+                MsiBuilder.WriteDirectoryTable(
+                    db,
+                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    isInstallerType: false,
+                    productName: "KnownFolderRootTest");
+                db.Commit();
+            }
+
+            using var readDb = new Database(msi, DatabaseOpenMode.ReadOnly);
+            using var view = readDb.OpenView(
+                "SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`");
+            view.Execute();
+
+            var rows = new Dictionary<string, (string Parent, string DefaultDir)>(StringComparer.Ordinal);
+            for (var record = view.Fetch(); record != null; record = view.Fetch())
+            {
+                using (record)
+                {
+                    rows[record.GetString(1)] = (record.GetString(2), record.GetString(3));
+                }
+            }
+
+            Assert.Equal(("CommonAppDataFolder", "."), rows["INSTALLDIR"]);
+            foreach (var row in rows)
+            {
+                if (!string.IsNullOrEmpty(row.Value.Parent))
+                {
+                    Assert.True(rows.ContainsKey(row.Value.Parent),
+                        $"Directory '{row.Key}' references missing parent '{row.Value.Parent}'");
+                }
+            }
+        }
+        finally
+        {
+            File.Delete(msi);
+        }
+    }
 
     [Fact]
     public void BuildScriptActionVbs_TinyScript_ProducesValidVbs()
