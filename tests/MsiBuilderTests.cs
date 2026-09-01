@@ -262,6 +262,19 @@ public class MsiBuilderTests
         Assert.DoesNotContain("\\cimipkg-\" & prodName", vbs);
     }
 
+    [Fact]
+    public void BuildScriptActionVbs_SpellsTheLogsDirectoryInLowercase()
+    {
+        // NTFS folds "Logs" and "logs" into one directory, so a capital L only shows
+        // up once something treats the path as data - a case-sensitive log shipper,
+        // or a mirror of the tree on another filesystem. Every writer must agree on
+        // the lowercase name the managing client defines.
+        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+
+        Assert.Contains("\\logs", vbs);
+        Assert.DoesNotContain("\\Logs", vbs);
+    }
+
     [Theory]
     [InlineData("CimianPreinstall", "preinstall")]
     [InlineData("CimianPostinstall", "postinstall")]

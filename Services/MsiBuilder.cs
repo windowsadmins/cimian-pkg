@@ -1388,9 +1388,8 @@ public class MsiBuilder
         // sidecar log: ws.Run goes straight to CreateProcess, which has no
         // redirection of its own, and the hidden window means console output is
         // otherwise lost forever. The log is echoed into Session.Log (visible in
-        // the msiexec /l*v log) and persisted under ManagedInstalls\Logs so
-        // endpoint tooling (e.g. an installcheck_script) can surface the last
-        // attempt's output into the managing client's run log.
+        // the msiexec /l*v log) and persisted under ManagedInstalls\logs\packages\
+        // so the managing client can drain it into its own run log.
         vbs.Append("  q = Chr(34)\r\n");
         vbs.Append("  logFile = tmpFile & \".log\"\r\n");
         vbs.Append("  cmdLine = \"cmd.exe /c \" & q & q & psExe & q & \" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \" & q & tmpFile & q & \" > \" & q & logFile & q & \" 2>&1\" & q\r\n");
