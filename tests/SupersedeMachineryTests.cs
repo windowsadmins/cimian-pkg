@@ -218,6 +218,103 @@ public class SupersedeMachineryTests
         }
     }
 
+    /// <summary>
+    /// A package whose identifier changed carries a new derived UpgradeCode, so it
+    /// no longer supersedes the product already installed under the old code. The
+    /// `supersedes` list must add those legacy families as extra Upgrade rows,
+    /// sharing PREVIOUSVERSIONSINSTALLED so RemoveExistingProducts retires them.
+    /// </summary>
+    [Fact]
+    public void WriteUpgradeTable_Supersedes_AddsARowPerLegacyFamily()
+    {
+        var path = Path.Combine(Path.GetTempPath(),
+            $"cimipkg-supersede-extra-{Guid.NewGuid():N}.msi");
+        var upgradeCode = UpgradeCodeGenerator.GenerateUpgradeCode("ca.test.Sample");
+        var legacyA = Guid.Parse("69c5aafa-e6c1-5765-8604-464c8b701a72");
+        var legacyB = Guid.Parse("cba9612a-c60f-5048-b6e0-44b0a09586ad");
+        try
+        {
+            using (var db = new Database(path, DatabaseOpenMode.Create))
+            {
+                MsiBuilder.CreateTables(db);
+                // Duplicates and the primary code itself must be ignored, or the
+                // Upgrade table's composite primary key collides and the build dies.
+                MsiBuilder.WriteUpgradeTable(
+                    db, upgradeCode, new[] { legacyA, legacyB, legacyA, upgradeCode });
+                db.Commit();
+            }
+
+            var rows = new List<(string Code, int Attributes, string ActionProperty)>();
+            using (var rdb = new Database(path, DatabaseOpenMode.ReadOnly))
+            using (var view = rdb.OpenView(
+                "SELECT `UpgradeCode`, `Attributes`, `ActionProperty` FROM `Upgrade`"))
+            {
+                view.Execute();
+                while (true)
+                {
+                    using var rec = view.Fetch();
+                    if (rec is null) break;
+                    rows.Add((rec.GetString(1).ToUpperInvariant(),
+                              rec.GetInteger(2),
+                              rec.GetString(3)));
+                }
+            }
+
+            Assert.Equal(3, rows.Count);
+            Assert.Contains($"{{{upgradeCode}}}".ToUpperInvariant(), rows.Select(r => r.Code));
+            Assert.Contains($"{{{legacyA}}}".ToUpperInvariant(),    rows.Select(r => r.Code));
+            Assert.Contains($"{{{legacyB}}}".ToUpperInvariant(),    rows.Select(r => r.Code));
+
+            // Every row, legacy included, must ignore remove failure and feed the
+            // same property RemoveExistingProducts consumes.
+            Assert.All(rows, r =>
+            {
+                Assert.Equal(4, r.Attributes & 4);
+                Assert.Equal("PREVIOUSVERSIONSINSTALLED", r.ActionProperty);
+            });
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
+    [Fact]
+    public void WriteUpgradeTable_NoSupersedes_WritesOnlyThePrimaryRow()
+    {
+        var path = Path.Combine(Path.GetTempPath(),
+            $"cimipkg-supersede-none-{Guid.NewGuid():N}.msi");
+        var upgradeCode = UpgradeCodeGenerator.GenerateUpgradeCode("ca.test.Sample");
+        try
+        {
+            using (var db = new Database(path, DatabaseOpenMode.Create))
+            {
+                MsiBuilder.CreateTables(db);
+                MsiBuilder.WriteUpgradeTable(db, upgradeCode, null);
+                db.Commit();
+            }
+
+            var count = 0;
+            using (var rdb = new Database(path, DatabaseOpenMode.ReadOnly))
+            using (var view = rdb.OpenView("SELECT `UpgradeCode` FROM `Upgrade`"))
+            {
+                view.Execute();
+                while (true)
+                {
+                    using var rec = view.Fetch();
+                    if (rec is null) break;
+                    count++;
+                }
+            }
+
+            Assert.Equal(1, count);
+        }
+        finally
+        {
+            File.Delete(path);
+        }
+    }
+
     [Theory]
     [InlineData(true,  true)]
     [InlineData(true,  false)]

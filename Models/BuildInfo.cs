@@ -191,6 +191,22 @@ public class BuildInfo
     public string? UpgradeCode { get; set; }
 
     /// <summary>
+    /// Additional UpgradeCode GUIDs this package supersedes.
+    ///
+    /// Each becomes an extra <c>Upgrade</c> table row, so FindRelatedProducts /
+    /// RemoveExistingProducts uninstall products from those legacy families during
+    /// this package's own install. Use it when a product's identifier changed and
+    /// its derived UpgradeCode moved with it: a changed UpgradeCode means the new
+    /// build no longer supersedes the old one, so without this the old product
+    /// lingers in Add/Remove Programs forever, sharing a keypath with the new one.
+    ///
+    /// Rows carry the same IgnoreRemoveFailure attribute as the primary row, so a
+    /// legacy product that is absent or broken is skipped, never failing the install.
+    /// </summary>
+    [YamlMember(Alias = "supersedes")]
+    public List<string>? Supersedes { get; set; }
+
+    /// <summary>
     /// Explicit override for the primary installed binary used by Cimian's
     /// MSI-verification defense-in-depth check (the pkginfo "key_path" field).
     /// Value can be either a path relative to install_location (e.g.

@@ -187,8 +187,28 @@ public class MsiBuilder
             ? Guid.Parse(buildInfo.UpgradeCode)
             : UpgradeCodeGenerator.GenerateUpgradeCode(identifier);
 
+        // Legacy upgrade families this build should also retire. Parsed up front so
+        // a malformed GUID fails the build rather than silently producing a package
+        // that never removes the predecessor it was meant to replace.
+        var supersedes = new List<Guid>();
+        foreach (var raw in buildInfo.Supersedes ?? [])
+        {
+            if (string.IsNullOrWhiteSpace(raw)) continue;
+            if (!Guid.TryParse(raw.Trim(), out var legacy))
+            {
+                throw new InvalidOperationException(
+                    $"build-info 'supersedes' contains a value that is not a GUID: '{raw}'");
+            }
+            supersedes.Add(legacy);
+        }
+
         _logger.LogInformation("ProductCode: {ProductCode}", productCode);
         _logger.LogInformation("UpgradeCode: {UpgradeCode}", upgradeCode);
+        if (supersedes.Count > 0)
+        {
+            _logger.LogInformation("Supersedes: {Supersedes}",
+                string.Join(", ", supersedes.Select(g => $"{{{g}}}")));
+        }
 
         // Collect payload files
         var payloadDir = Path.Combine(projectDir, "payload");
@@ -259,7 +279,7 @@ public class MsiBuilder
             // best-effort: a broken/unresolvable old package is skipped, never
             // aborting the new install — that abort was the field failure (#19)
             // that originally motivated dropping the table.
-            WriteUpgradeTable(db, upgradeCode);
+            WriteUpgradeTable(db, upgradeCode, supersedes);
 
             // Plan the cabinet layout once; both WritePayloadTables (Media/File
             // rows) and EmbedPayloadCabs (makecab + stream embedding) consume
@@ -590,14 +610,32 @@ public class MsiBuilder
     /// completes with exit 0 — never the silent /qn source-prompt abort that #19
     /// removed this machinery to avoid.
     /// </summary>
-    internal static void WriteUpgradeTable(Database db, Guid upgradeCode)
+    internal static void WriteUpgradeTable(
+        Database db,
+        Guid upgradeCode,
+        IEnumerable<Guid>? supersedes = null)
     {
         const int ignoreRemoveFailure = 4;
         const int languagesExclusive = 256;
         var attributes = ignoreRemoveFailure | languagesExclusive;
-        db.Execute(
+
+        void AddRow(Guid code) => db.Execute(
             "INSERT INTO `Upgrade` (`UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty`) " +
-            $"VALUES ('{{{upgradeCode}}}', '0.0.0', '', '', {attributes}, '', 'PREVIOUSVERSIONSINSTALLED')");
+            $"VALUES ('{{{code}}}', '0.0.0', '', '', {attributes}, '', 'PREVIOUSVERSIONSINSTALLED')");
+
+        AddRow(upgradeCode);
+
+        // Extra families named by build-info `supersedes`. They share the
+        // PREVIOUSVERSIONSINSTALLED ActionProperty, so RemoveExistingProducts
+        // uninstalls anything found in any listed family during this install.
+        // This is the only way to retire a product whose derived UpgradeCode
+        // moved: once the code changes, the new build stops superseding the old
+        // one and both sit in ARP sharing a keypath. Duplicates and the primary
+        // code are skipped so the composite primary key cannot collide.
+        foreach (var legacy in (supersedes ?? []).Distinct().Where(g => g != upgradeCode))
+        {
+            AddRow(legacy);
+        }
     }
 
     internal static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
