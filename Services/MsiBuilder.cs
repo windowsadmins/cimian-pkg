@@ -994,13 +994,44 @@ public class MsiBuilder
             "} catch {}\r\n" +
             "$cimianPf = [Environment]::GetFolderPath('ProgramFiles')\r\n" +
             "$cimianPfx86 = ${env:ProgramFiles(x86)}\r\n" +
+            // Enumerating scheduled tasks is bounded, and has to be.
+            //
+            // Get-ScheduledTask can block indefinitely on a host whose Task Scheduler
+            // enumeration has wedged. The service still reports Running and the call
+            // simply never returns, so neither try/catch nor -ErrorAction helps --
+            // nothing throws, it hangs.
+            //
+            // This block is injected into the preinstall of every package that ships an
+            // executable, so an unbounded call here means one wedged Task Scheduler stops
+            // EVERY package installing on that machine, silently, for as long as the
+            // machine stays up. Measured in the field: on an affected host the call was
+            // still blocked after 60 seconds while healthy hosts enumerated several
+            // hundred tasks in about three, and nothing could install until a restart.
+            //
+            // So the scan runs in its own runspace with a deadline. If Task Scheduler
+            // will not answer, the task-stopping step is abandoned and the
+            // process-stopping step below still runs -- that is the part which actually
+            // releases the file locks the install needs.
+            "$cimianTaskScanTimeoutMs = 20000\r\n" +
+            "$cimianStopTasksFor = {\r\n" +
+            "    param($cimianExeName)\r\n" +
+            "    Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {\r\n" +
+            "        $_.Actions -and ($_.Actions.Execute -match [regex]::Escape($cimianExeName))\r\n" +
+            "    } | ForEach-Object {\r\n" +
+            "        Stop-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue\r\n" +
+            "    }\r\n" +
+            "}\r\n" +
             "foreach ($cimianExe in $cimianPayloadExes) {\r\n" +
             "    $cimianBase = [System.IO.Path]::GetFileNameWithoutExtension($cimianExe)\r\n" +
             "    try {\r\n" +
-            "        Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object {\r\n" +
-            "            $_.Actions -and ($_.Actions.Execute -match [regex]::Escape($cimianExe))\r\n" +
-            "        } | ForEach-Object {\r\n" +
-            "            Stop-ScheduledTask -TaskName $_.TaskName -TaskPath $_.TaskPath -ErrorAction SilentlyContinue\r\n" +
+            "        $cimianPs = [PowerShell]::Create()\r\n" +
+            "        [void]$cimianPs.AddScript($cimianStopTasksFor).AddArgument($cimianExe)\r\n" +
+            "        $cimianAsync = $cimianPs.BeginInvoke()\r\n" +
+            "        if ($cimianAsync.AsyncWaitHandle.WaitOne($cimianTaskScanTimeoutMs)) {\r\n" +
+            "            try { [void]$cimianPs.EndInvoke($cimianAsync) } catch {}\r\n" +
+            "            try { $cimianPs.Dispose() } catch {}\r\n" +
+            "        } else {\r\n" +
+            "            Write-Host \"cimipkg: Task Scheduler did not answer within 20s; skipping the scheduled-task check for $cimianExe and continuing.\"\r\n" +
             "        }\r\n" +
             "    } catch {}\r\n" +
             "    try {\r\n" +
