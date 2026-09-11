@@ -221,4 +221,4 @@ The post-build `cimiimport` prompt is automatically skipped when stdin is non-in
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+MIT License — see [LICENSE](LICENSE).
