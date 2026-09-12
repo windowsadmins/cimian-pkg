@@ -33,6 +33,10 @@ namespace Cimian.CLI.Cimipkg.Services;
 /// </summary>
 public static class ImportPrompter
 {
+    // cimiimport is interactive. Ten minutes allows a human to answer; past that
+    // nobody is answering and the build should say so.
+    private static readonly TimeSpan ImportTimeout = TimeSpan.FromMinutes(10);
+
     private const int PromptTimeoutSeconds = 60;
     private const string CimiimportExecutable = "cimiimport.exe";
 
@@ -168,7 +172,14 @@ public static class ImportPrompter
             throw new InvalidOperationException($"Failed to start {cimiimportPath}");
         }
 
-        process.WaitForExit();
+        // Bounded. cimiimport is interactive, and an unbounded wait here is how a
+        // build hangs on a prompt nobody is there to answer.
+        if (!process.WaitForExit((int)ImportTimeout.TotalMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new InvalidOperationException(
+                $"cimiimport did not exit within {ImportTimeout.TotalSeconds:N0}s and was killed.");
+        }
 
         if (process.ExitCode != 0)
         {

@@ -16,6 +16,10 @@ namespace Cimian.CLI.Cimipkg.Services;
 /// </summary>
 public class PackageBuilder
 {
+    // IntuneWinAppUtil and the generic helper below both wrap external tools;
+    // neither should ever run for minutes on a healthy build.
+    private static readonly TimeSpan ToolTimeout = TimeSpan.FromMinutes(5);
+
     private readonly ILogger<PackageBuilder> _logger;
     private readonly ScriptProcessor _scriptProcessor;
     private readonly ChocolateyGenerator _chocolateyGenerator;
@@ -528,7 +532,12 @@ install_location: C:\
             };
 
             using var process = Process.Start(psi);
-            process?.WaitForExit();
+            if (process != null && !process.WaitForExit((int)ToolTimeout.TotalMilliseconds))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                throw new InvalidOperationException(
+                    $"IntuneWinAppUtil did not exit within {ToolTimeout.TotalSeconds:N0}s and was killed.");
+            }
 
             if (process?.ExitCode != 0)
             {
@@ -820,7 +829,12 @@ exit $LASTEXITCODE
             throw new InvalidOperationException($"Failed to start process: {command}");
         }
 
-        process.WaitForExit();
+        if (!process.WaitForExit((int)ToolTimeout.TotalMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new InvalidOperationException(
+                $"{command} did not exit within {ToolTimeout.TotalSeconds:N0}s and was killed.");
+        }
 
         if (process.ExitCode != 0)
         {
