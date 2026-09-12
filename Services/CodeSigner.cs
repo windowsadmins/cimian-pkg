@@ -16,6 +16,11 @@ namespace Cimian.CLI.Cimipkg.Services;
 /// </summary>
 public class CodeSigner
 {
+    // Signing reaches out to a timestamp authority, so it is the slowest thing
+    // here and the most likely to stall on a network problem.
+    private static readonly TimeSpan SignToolTimeout = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan NuGetSignTimeout = TimeSpan.FromMinutes(5);
+
     private readonly ILogger<CodeSigner> _logger;
 
     public CodeSigner(ILogger<CodeSigner> logger)
@@ -108,9 +113,20 @@ public class CodeSigner
             throw new InvalidOperationException("Failed to start signtool.exe process");
         }
 
-        var output = process.StandardOutput.ReadToEnd();
-        var error = process.StandardError.ReadToEnd();
-        process.WaitForExit();
+        // Both streams drained concurrently and the wait bounded; signtool can sit
+        // for a long time on an unreachable timestamp authority.
+        var stdout = process.StandardOutput.ReadToEndAsync();
+        var stderr = process.StandardError.ReadToEndAsync();
+
+        if (!process.WaitForExit((int)SignToolTimeout.TotalMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new InvalidOperationException(
+                $"signtool.exe did not exit within {SignToolTimeout.TotalSeconds:N0}s and was killed.");
+        }
+
+        var output = stdout.GetAwaiter().GetResult();
+        var error = stderr.GetAwaiter().GetResult();
 
         if (process.ExitCode != 0)
         {
@@ -152,7 +168,13 @@ public class CodeSigner
                 return;
             }
 
-            process.WaitForExit();
+            if (!process.WaitForExit((int)NuGetSignTimeout.TotalMilliseconds))
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                _logger.LogWarning("nuget sign did not exit within {Seconds:N0}s and was killed. Package will not be signed.", NuGetSignTimeout.TotalSeconds);
+                return;
+            }
+
             if (process.ExitCode != 0)
             {
                 var error = process.StandardError.ReadToEnd();

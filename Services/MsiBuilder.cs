@@ -13,6 +13,10 @@ namespace Cimian.CLI.Cimipkg.Services;
 /// </summary>
 public class MsiBuilder
 {
+    // makecab on a large payload is the slowest step in a build; five minutes is
+    // well past any healthy run and short enough to fail with a reason.
+    private static readonly TimeSpan MakeCabTimeout = TimeSpan.FromMinutes(5);
+
     private readonly ILogger _logger;
     private readonly CodeSigner _codeSigner;
     private readonly ScriptProcessor _scriptProcessor;
@@ -1710,7 +1714,16 @@ public class MsiBuilder
         // (or vice versa). This bit large payloads on arm64 reliably.
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
-        process.WaitForExit();
+
+        // Bounded: a makecab that stops making progress should fail the build with a
+        // clear reason rather than sit until the agent job times out.
+        if (!process.WaitForExit((int)MakeCabTimeout.TotalMilliseconds))
+        {
+            try { process.Kill(entireProcessTree: true); } catch { }
+            throw new InvalidOperationException(
+                $"makecab.exe did not exit within {MakeCabTimeout.TotalSeconds:N0}s building '{seg.CabinetName}' and was killed.");
+        }
+
         var output = stdoutTask.GetAwaiter().GetResult();
         var error = stderrTask.GetAwaiter().GetResult();
 
