@@ -1156,33 +1156,46 @@ public class MsiBuilder
     }
 
     /// <summary>
-    /// Refuses to embed a script that the PowerShell parser rejects. A script
-    /// with a syntax error can never succeed at install time — it exits non-zero
-    /// on every device and the MSI dies with an opaque 1603. Failing the build
-    /// here surfaces the parse error (with line numbers) to the one person
-    /// looking at the CI log instead of the whole fleet. Set
+    /// Refuses to embed a script that the PowerShell parser rejects, or that
+    /// parses but opens a statement with an assignment missing its <c>$</c>
+    /// (<c>x64 = ...</c>, which PowerShell runs as a command named <c>x64</c>).
+    /// Either can never succeed at install time — it exits non-zero on every
+    /// device and the MSI dies with an opaque 1603. Failing the build here
+    /// surfaces the finding (with line numbers) to the one person looking at
+    /// the CI log instead of the whole fleet. Set
     /// CIMIAN_PKG_SKIP_SCRIPT_VALIDATION=1 to bypass in an emergency.
     /// </summary>
     private void ValidateEmbeddedScript(string actionName, string content)
     {
+        var note = CheckEmbeddedScript(actionName, content);
+        if (!string.IsNullOrEmpty(note))
+        {
+            _logger.LogWarning("{Action}: {Note}", actionName, note);
+        }
+    }
+
+    /// <summary>
+    /// Throws <see cref="InvalidOperationException"/> when
+    /// <paramref name="content"/> fails <see cref="PowerShellSyntax.TryValidate"/>.
+    /// Returns a non-fatal note (validation skipped on this host) or empty.
+    /// </summary>
+    internal static string CheckEmbeddedScript(string actionName, string content)
+    {
         if (Environment.GetEnvironmentVariable("CIMIAN_PKG_SKIP_SCRIPT_VALIDATION") == "1")
         {
-            return;
+            return string.Empty;
         }
 
         if (!PowerShellSyntax.TryValidate(content, out var errors))
         {
             throw new InvalidOperationException(
-                $"{actionName} script does not parse as PowerShell and would fail every install with MSI 1603.\n" +
+                $"{actionName} script fails PowerShell validation and would fail every install with MSI 1603.\n" +
                 $"{errors}\n" +
                 "If a ${VAR} placeholder was substituted, check the resolved value; " +
                 "set CIMIAN_PKG_SKIP_SCRIPT_VALIDATION=1 to bypass.");
         }
 
-        if (!string.IsNullOrEmpty(errors))
-        {
-            _logger.LogWarning("{Action}: {Note}", actionName, errors);
-        }
+        return errors;
     }
 
     /// <summary>
