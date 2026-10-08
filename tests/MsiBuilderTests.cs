@@ -410,6 +410,22 @@ public class MsiBuilderTests
     // large-payload case rolls over correctly at the threshold.
     // =========================================================================
 
+    // An arm64 build used to be stamped "x64;1033" like every other package,
+    // so Windows treated it as an x64 MSI and the inspector showed x64.
+    [Theory]
+    [InlineData("arm64", "Arm64", 500)]
+    [InlineData("ARM64", "Arm64", 500)]
+    [InlineData(" aarch64 ", "Arm64", 500)]
+    [InlineData("x64", "x64", 200)]
+    [InlineData("amd64", "x64", 200)]
+    [InlineData(null, "x64", 200)]
+    [InlineData("", "x64", 200)]
+    [InlineData("{{ARCHITECTURE}}", "x64", 200)]
+    public void SummaryPlatform_MapsArchitecture(string? architecture, string platform, int schema)
+    {
+        Assert.Equal((platform, schema), MsiBuilder.SummaryPlatform(architecture));
+    }
+
     [Fact]
     public void PlanCabinetSegments_EmptyPayload_ReturnsZeroSegments()
     {

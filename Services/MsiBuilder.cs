@@ -454,6 +454,20 @@ public class MsiBuilder
             "Please reboot the computer and run the installer again.')");
     }
 
+    /// <summary>
+    /// The Summary Information platform and minimum schema for a build-info
+    /// architecture. Arm64 needs schema 500 (Windows Installer 5.0); anything
+    /// else, including no architecture at all, keeps the x64 / 200 every
+    /// cimipkg MSI has always carried. 32-bit is not offered: every component
+    /// is authored 64-bit, which an "Intel" package cannot hold.
+    /// </summary>
+    internal static (string Platform, int Schema) SummaryPlatform(string? architecture) =>
+        architecture?.Trim().ToLowerInvariant() switch
+        {
+            "arm64" or "aarch64" => ("Arm64", 500),
+            _ => ("x64", 200),
+        };
+
     private static void WriteSummaryInfo(string msiPath, string productName, string msiVersion, BuildInfo buildInfo)
     {
         using var si = new SummaryInfo(msiPath, enableWrite: true);
@@ -461,10 +475,11 @@ public class MsiBuilder
         si.Subject = productName;
         si.Author = buildInfo.Product.Developer ?? "Cimian";
         si.Comments = buildInfo.Product.Description ?? $"{productName} installer";
-        si.Template = "x64;1033"; // x64 platform, English
+        var (platform, schema) = SummaryPlatform(buildInfo.Product.Architecture);
+        si.Template = $"{platform};1033"; // platform, English
         si.RevisionNumber = $"{{{Guid.NewGuid()}}}"; // Package code (unique per MSI file)
         si.CreatingApp = "cimipkg";
-        si.PageCount = 200; // Minimum installer version (2.0)
+        si.PageCount = schema; // Minimum installer schema
         si.WordCount = 2; // Bit 1 = compressed source files (CAB embedded)
         si.Security = 2; // Read-only recommended
         si.Persist();
