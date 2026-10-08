@@ -311,7 +311,7 @@ public class MsiBuilder
             if (hasScripts)
             {
                 _logger.LogDebug("Writing script custom actions...");
-                WriteScriptCustomActions(db, scriptsDir, envVars, installDir, buildInfo, payloadFiles);
+                WriteScriptCustomActions(db, scriptsDir, envVars, installDir, buildInfo, payloadFiles, productName, msiVersion);
             }
 
             _logger.LogDebug("Committing database...");
@@ -401,6 +401,10 @@ public class MsiBuilder
         // install aborts with 1603 before any payload or custom action runs.
         // An empty Signature table makes the probe a harmless no-match on every
         // engine while leaving the REBOOTPENDING RegLocator search intact.
+        // DrLocator: where AppSearch looks for pwsh.exe (WriteScriptRuntimeSearch).
+        db.Execute("CREATE TABLE `DrLocator` (`Signature_` CHAR(72) NOT NULL, `Parent` CHAR(72), `Path` CHAR(255), `Depth` SHORT PRIMARY KEY `Signature_`, `Parent`, `Path`)");
+        // Binary: the script bodies the script custom actions run.
+        db.Execute("CREATE TABLE `Binary` (`Name` CHAR(72) NOT NULL, `Data` OBJECT NOT NULL PRIMARY KEY `Name`)");
         db.Execute("CREATE TABLE `Signature` (`Signature` CHAR(72) NOT NULL, `FileName` CHAR(255) NOT NULL LOCALIZABLE, `MinVersion` CHAR(20), `MaxVersion` CHAR(20), `MinSize` LONG, `MaxSize` LONG, `MinDate` LONG, `MaxDate` LONG, `Languages` CHAR(255) PRIMARY KEY `Signature`)");
 
         // Upgrade table. cimipkg uses it for one narrow purpose: detect and
@@ -928,6 +932,12 @@ public class MsiBuilder
             // sits in a ~110-second timeout before falling through. Running the
             // preinstall script (which stops the service) before sequence 1400
             // means InstallValidate sees nothing locked and proceeds immediately.
+            // The PowerShell runtime the script actions launch: 5.1 first, then
+            // overwritten by pwsh 7-preview and pwsh 7 when AppSearch found them, so
+            // 7 wins. Unconditional on REMOVE because the uninstall action needs it too.
+            AddAction("SetCimianPsExe", null, 1390);
+            AddAction("SetCimianPsExePreview", "CIMIAN_PWSH7PREVIEW", 1391);
+            AddAction("SetCimianPsExe7", "CIMIAN_PWSH7", 1392);
             AddAction("CimianPreinstall", "NOT (REMOVE=\"ALL\")", 1398);
         }
 
@@ -954,12 +964,11 @@ public class MsiBuilder
             // means a failing install-phase script rolls the whole install back cleanly
             // rather than leaving a committed-but-misconfigured product.
             //
-            // Each deferred action is preceded by its immediate Type 51 set-property
-            // companion (Set<Action>Data) that marshals INSTALLDIR/REMOVE/ProductVersion/
-            // ProductName into CustomActionData — the only property a deferred CA can read.
+            // A deferred exe action's command line is formatted when the execution
+            // script is generated, so [INSTALLDIR] and [CIMIAN_PSEXE] reach it without
+            // a CustomActionData companion.
             //
             // Postinstall fires on every install operation, skipped only on uninstall.
-            AddAction("SetCimianPostinstallData", "NOT (REMOVE=\"ALL\")", 6450);
             AddAction("CimianPostinstall", "NOT (REMOVE=\"ALL\")", 6500);
             // Uninstall fires only on a genuine standalone uninstall. The
             // UPGRADINGPRODUCTCODE guard skips this CA when the product is being
@@ -967,7 +976,6 @@ public class MsiBuilder
             // sets UPGRADINGPRODUCTCODE on the old product), so replacing an old
             // build does not run its uninstall script — only an explicit removal
             // does.
-            AddAction("SetCimianUninstallData", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6460);
             AddAction("CimianUninstall", "REMOVE=\"ALL\" AND NOT UPGRADINGPRODUCTCODE", 6510);
         }
     }
@@ -1059,7 +1067,9 @@ public class MsiBuilder
         Dictionary<string, string> envVars,
         string installDir,
         BuildInfo buildInfo,
-        IReadOnlyList<string> payloadFiles)
+        IReadOnlyList<string> payloadFiles,
+        string productName,
+        string msiVersion)
     {
         // Inject $payloadRoot so scripts can find staged files — matching sbin-installer behavior.
         // For installer-type (TempFolder), we can't hardcode the path — it resolves at install time.
@@ -1068,7 +1078,7 @@ public class MsiBuilder
         string variableHeader;
         if (installDir == "[INSTALLDIR]")
         {
-            // Installer-type: VBScript CA sets CIMIAN_INSTALLDIR env var from Session.Property("INSTALLDIR")
+            // Installer-type: the script custom action sets CIMIAN_INSTALLDIR from [INSTALLDIR]
             // before launching PowerShell. Same as sbin-installer setting $payloadRoot from extraction dir.
             variableHeader =
                 "$payloadRoot = $env:CIMIAN_INSTALLDIR\r\n" +
@@ -1131,7 +1141,7 @@ public class MsiBuilder
                 ScriptProcessor.InjectPowerShellHeader(preBody, variableHeader), buildInfo)
             : "# No preinstall scripts";
         ValidateEmbeddedScript("CimianPreinstall", preScript);
-        WriteImmediateScriptAction(db, "CimianPreinstall", preScript);
+        WriteScriptAction(db, "CimianPreinstall", preScript, 50, "install", productName, msiVersion);
 
         // Postinstall: deferred + no-impersonate, scheduled just before InstallFinalize so
         // it runs as LocalSystem on every launch path (double-click, msiexec, Cimian). An
@@ -1143,7 +1153,7 @@ public class MsiBuilder
                     CombineScripts(postinstallScripts, envVars), variableHeader), buildInfo)
             : "# No postinstall scripts";
         ValidateEmbeddedScript("CimianPostinstall", postScript);
-        WriteDeferredScriptAction(db, "CimianPostinstall", postScript);
+        WriteScriptAction(db, "CimianPostinstall", postScript, 3122, "install", productName, msiVersion);
 
         // Uninstall: deferred + no-impersonate, during removal.
         var uninstallScript = uninstallScripts.Length > 0
@@ -1152,7 +1162,10 @@ public class MsiBuilder
                     CombineScripts(uninstallScripts, envVars), variableHeader), buildInfo)
             : "# No uninstall scripts";
         ValidateEmbeddedScript("CimianUninstall", uninstallScript);
-        WriteDeferredScriptAction(db, "CimianUninstall", uninstallScript);
+        WriteScriptAction(db, "CimianUninstall", uninstallScript, 3186, "uninstall", productName, msiVersion);
+
+        WriteScriptRuntimeSearch(db);
+        db.Execute("INSERT INTO `Property` (`Property`, `Value`) VALUES (?, '2')", ScriptFormatProperty);
     }
 
     /// <summary>
@@ -1185,81 +1198,191 @@ public class MsiBuilder
         }
     }
 
+    /// <summary>Property that marks how a package carries its scripts; 2 = Binary table + exe custom action.</summary>
+    internal const string ScriptFormatProperty = "CIMIAN_PKG_SCRIPT_FORMAT";
+
+    /// <summary>Property holding the PowerShell runtime the script custom actions launch.</summary>
+    internal const string PsExeProperty = "CIMIAN_PSEXE";
+
     /// <summary>
-    /// Write a Type 38 inline VBScript custom action that runs a PowerShell script
-    /// of arbitrary size. The VBS ships the PS1 content as a chunked base64 string,
-    /// decodes it at install time via MSXML + ADODB.Stream, writes it to a temp
-    /// .ps1 file, and invokes <c>powershell.exe -File</c> on it.
+    /// Script custom actions without VBScript.
     ///
-    /// Why not the obvious <c>-EncodedCommand</c> approach:
-    /// the previous implementation inlined the base64 into a single <c>ws.Run</c>
-    /// line. For any non-trivial postinstall script (~15 KB of PS1 is common) that
-    /// line grew past three hard limits simultaneously:
-    ///   * VBScript parser chokes at ~1022 chars per source line
-    ///   * <c>CreateProcess</c> command line limit is 32,767 chars
-    ///   * Legacy cmd.exe limit is 8,191 chars
-    /// which produced <c>Info 1720. ... script error -2147024690, Line 5, Column 1</c>
-    /// at install time and caused the whole custom action to silently no-op.
-    /// RenderingManager v2026.04.10.1431 hit exactly this, which is why DiagnoseSystem
-    /// and MonitorAlerts scheduled tasks never got registered on 142 endpoints.
+    /// Each script lives in the Binary table (a row named after its action, holding
+    /// the UTF-8-with-BOM script as base64 text) and runs through a Type 50 custom
+    /// action: an exe whose path comes from the <see cref="PsExeProperty"/> property,
+    /// so the action launches powershell.exe or pwsh.exe directly. Its command line
+    /// carries a short bootstrap that opens this MSI read-only through the Windows
+    /// Installer COM object ([OriginalDatabase] -- the source on install, the cached
+    /// copy on uninstall), writes the script to %TEMP%, runs it the same way the
+    /// VBScript action did (cmd /c, output to a sidecar log), copies the log under
+    /// ManagedInstalls\logs\packages\&lt;product&gt;\ and exits with the script's code.
     ///
-    /// The temp-file approach side-steps all three limits: the base64 lives in a
-    /// normal VBS variable built from many short <c>&amp;</c> concatenations, then
-    /// only the short temp-file path is passed to <c>powershell.exe</c>.
+    /// Why: Windows is removing VBScript (a Feature on Demand from 24H2), and an
+    /// image without it -- Windows Sandbox 26100 is one -- fails every Type 38/3110
+    /// action with error 2738 and the whole install with 1603.
+    ///
+    /// Behaviour kept from the VBScript actions:
+    ///   * CimianPreinstall is immediate (Type 50) before InstallValidate; it runs in
+    ///     the launching context.
+    ///   * CimianPostinstall and CimianUninstall are deferred + no-impersonate
+    ///     (Type 3122 = 50 + 1024 + 2048), so they run as LocalSystem however the MSI
+    ///     was launched.
+    ///   * A non-zero exit fails an install-phase action (no +64) and rolls the
+    ///     install back; the uninstall action is best-effort (+64, Type 3186).
+    ///   * pwsh 7, then pwsh 7-preview, then Windows PowerShell 5.1 (AppSearch +
+    ///     <see cref="PsExeProperty"/>), and CIMIAN_INSTALLDIR / CIMIAN_PHASE /
+    ///     CIMIAN_VERSION in the script's environment.
+    ///
+    /// What changes: an exe custom action cannot write to the MSI log, so the
+    /// script's output is no longer echoed into msiexec /l*v -- the log shows the
+    /// action and its return code, and the output is in the sidecar log only.
     /// </summary>
-    private static void WriteImmediateScriptAction(MsiDatabase db, string actionName, string scriptContent)
+    private static void WriteScriptAction(
+        MsiDatabase db, string actionName, string scriptContent, int type,
+        string phase, string productName, string msiVersion)
     {
-        var vbsStr = BuildScriptActionVbs(actionName, scriptContent);
-        // Type 38 = inline VBScript (Target column), immediate. Used only for
-        // CimianPreinstall now (postinstall/uninstall are deferred — see
-        // WriteDeferredScriptAction). Deliberately NOT +64 (msidbCustomActionTypeContinue):
-        // a failing install-phase preinstall must fail the MSI so the managing client
-        // records a failed install instead of a phantom success that installchecks then
-        // refute forever (the WinAdminsAccount install-loop incident, June 2026). The VBS
-        // itself only raises for cimianPhase = "install".
-        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 38, '', '{EscSql(vbsStr)}', 0)");
+        WriteScriptBinary(db, actionName, scriptContent);
+        var target = BuildScriptActionCommandLine(actionName, phase, productName, msiVersion);
+        db.Execute(
+            $"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES (?, {type}, ?, ?, 0)",
+            actionName, PsExeProperty, target);
     }
 
     /// <summary>
-    /// Write a deferred, no-impersonate Type 3110 VBScript custom action plus the Type 51
-    /// set-property companion that feeds it CustomActionData.
-    ///
-    /// Why deferred + no-impersonate instead of the immediate Type 38: an immediate custom
-    /// action runs in the security context of the process that launched the install. When a
-    /// cimipkg MSI is installed by an elevated launcher (Cimian/managedsoftwareupdate as
-    /// SYSTEM, an elevated BootstrapMate, or msiexec from an elevated prompt) that context is
-    /// already SYSTEM/admin, so an immediate postinstall could write HKLM and everything
-    /// worked. But a plain double-click in Explorer by a non-elevated user runs the immediate
-    /// custom action in the *user's* unelevated token even though the install itself elevates
-    /// — so a postinstall that writes HKLM (e.g. CimianAuth's credential setup) failed, and
-    /// once cimipkg started failing the install on a non-zero script exit that surfaced as
-    /// MSI error 1720 ("a script required for this install to complete could not be run"),
-    /// orphaning attended-provisioned devices. Deferred (msidbCustomActionTypeInScript, 1024)
-    /// + no-impersonate (msidbCustomActionTypeNoImpersonate, 2048) runs the script as
-    /// LocalSystem inside the install's elevated execute-sequence script, so it succeeds the
-    /// same way no matter how the MSI was launched.
-    ///
-    /// Type 3110 = 38 (the same inline-VBScript-in-Target base type as the immediate action)
-    /// + 1024 + 2048. Deliberately NOT +64 (msidbCustomActionTypeContinue): a failing
-    /// install-phase script must fail — and now cleanly roll back — the MSI, because the
-    /// deferred action runs before InstallFinalize commits.
+    /// Stores <paramref name="scriptContent"/> in the Binary table under
+    /// <paramref name="name"/> as base64 of its UTF-8-with-BOM bytes. Base64 keeps
+    /// the stream ASCII, so the bootstrap can read it as text through the COM API.
     /// </summary>
-    private static void WriteDeferredScriptAction(MsiDatabase db, string actionName, string scriptContent)
+    internal static void WriteScriptBinary(MsiDatabase db, string name, string scriptContent)
     {
-        var vbsStr = BuildScriptActionVbs(actionName, scriptContent, deferred: true);
-        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 3110, '', '{EscSql(vbsStr)}', 0)");
+        var tmp = Path.Combine(Path.GetTempPath(), $"cimipkg-{name}-{Guid.NewGuid():N}.b64");
+        try
+        {
+            File.WriteAllText(tmp, EncodeScript(scriptContent), Encoding.ASCII);
+            using var view = db.OpenView("SELECT `Name`, `Data` FROM `Binary`");
+            view.Execute();
+            using var record = MsiRecord.Create(2);
+            record.SetString(1, name);
+            record.SetStream(2, tmp);
+            view.Assign(record);
+        }
+        finally
+        {
+            try { File.Delete(tmp); } catch { }
+        }
+    }
 
-        // Type 51 (set-property) companion: a deferred CA can only read the single
-        // CustomActionData property, whose name must match the deferred action. Stage the
-        // four values the VBS needs (INSTALLDIR for installer-type payload root, REMOVE for
-        // the install/uninstall phase, ProductVersion, ProductName for the sidecar log name)
-        // pipe-delimited. The Source column is the property to set (== the deferred action
-        // name); the Target column is formatted by MSI at run time so [INSTALLDIR] etc.
-        // expand to their resolved values. This must be sequenced before the deferred action
-        // (see WriteInstallSequence) so the property is set when MSI snapshots CustomActionData.
-        var setActionName = "Set" + actionName + "Data";
-        const string data = "[INSTALLDIR]|[REMOVE]|[ProductVersion]|[ProductName]";
-        db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(setActionName)}', 51, '{EscSql(actionName)}', '{EscSql(data)}', 0)");
+    /// <summary>
+    /// Base64 of the script's UTF-8 bytes with a BOM. The BOM makes PowerShell 5.1
+    /// read the staged file as UTF-8 rather than the system ANSI code page.
+    /// </summary>
+    internal static string EncodeScript(string scriptContent)
+    {
+        var bom = Encoding.UTF8.GetPreamble();
+        var body = Encoding.UTF8.GetBytes(scriptContent);
+        var bytes = new byte[bom.Length + body.Length];
+        Buffer.BlockCopy(bom, 0, bytes, 0, bom.Length);
+        Buffer.BlockCopy(body, 0, bytes, bom.Length, body.Length);
+        return Convert.ToBase64String(bytes);
+    }
+
+    /// <summary>
+    /// Authors the PowerShell runtime lookup: AppSearch finds pwsh.exe under
+    /// %ProgramFiles%\PowerShell\7 and \7-preview, and three Type 51 actions set
+    /// <see cref="PsExeProperty"/> to 5.1, then overwrite it with whichever pwsh was
+    /// found (sequenced so 7 wins over 7-preview).
+    /// </summary>
+    internal static void WriteScriptRuntimeSearch(MsiDatabase db)
+    {
+        void Locate(string signature, string property, string path)
+        {
+            db.Execute("INSERT INTO `Signature` (`Signature`, `FileName`) VALUES (?, 'pwsh.exe')", signature);
+            db.Execute("INSERT INTO `DrLocator` (`Signature_`, `Parent`, `Path`, `Depth`) VALUES (?, '', ?, 0)", signature, path);
+            db.Execute("INSERT INTO `AppSearch` (`Property`, `Signature_`) VALUES (?, ?)", property, signature);
+        }
+
+        Locate("CimianPwsh7", "CIMIAN_PWSH7", @"[ProgramFiles64Folder]PowerShell\7");
+        Locate("CimianPwsh7Preview", "CIMIAN_PWSH7PREVIEW", @"[ProgramFiles64Folder]PowerShell\7-preview");
+
+        void SetPsExe(string action, string value) => db.Execute(
+            "INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES (?, 51, ?, ?, 0)",
+            action, PsExeProperty, value);
+
+        SetPsExe("SetCimianPsExe", @"[System64Folder]WindowsPowerShell\v1.0\powershell.exe");
+        SetPsExe("SetCimianPsExePreview", "[CIMIAN_PWSH7PREVIEW]");
+        SetPsExe("SetCimianPsExe7", "[CIMIAN_PWSH7]");
+    }
+
+    /// <summary>
+    /// The custom action's command line: arguments to powershell.exe / pwsh.exe whose
+    /// -Command is the bootstrap. Public so tests can check it without an MSI.
+    ///
+    /// The Target column is Formatted text, so the only properties MSI expands are
+    /// [INSTALLDIR], [OriginalDatabase] and [CIMIAN_PSEXE]; every other square bracket
+    /// is escaped as [\[] / [\]]. The bootstrap uses no double quotes (it sits inside
+    /// one quoted -Command argument) and no braces. Product name and version are
+    /// fixed at build time and quoted for PowerShell; INSTALLDIR is a runtime path in
+    /// a single-quoted string, so a path containing an apostrophe is not supported.
+    /// </summary>
+    public static string BuildScriptActionCommandLine(string actionName, string phase, string productName, string msiVersion)
+    {
+        if (string.IsNullOrEmpty(actionName) || !actionName.All(c => char.IsLetterOrDigit(c) || c == '_'))
+        {
+            throw new ArgumentException(
+                $"actionName must only contain letters, digits or '_'; got '{actionName}'", nameof(actionName));
+        }
+
+        static string Quote(string value) => "'" + value.Replace("'", "''") + "'";
+
+        // ProductName names a directory, so strip the characters NTFS rejects, and
+        // braces, which are MSI Formatted syntax in the command line.
+        var logDir = productName;
+        foreach (var ch in new[] { '\\', '/', ':', '*', '?', '"', '<', '>', '|', '{', '}' })
+        {
+            logDir = logDir.Replace(ch, '_');
+        }
+
+        const string InstallDir = "\u0001INSTALLDIR\u0001";
+        const string Database = "\u0001OriginalDatabase\u0001";
+        const string PsExe = "\u0001CIMIAN_PSEXE\u0001";
+
+        var sql = $"SELECT `Data` FROM `Binary` WHERE `Name`='{actionName}'";
+        var steps = new[]
+        {
+            "$ErrorActionPreference='Stop'",
+            $"$env:CIMIAN_INSTALLDIR='{InstallDir}'",
+            $"$env:CIMIAN_PHASE={Quote(phase)}",
+            $"$env:CIMIAN_VERSION={Quote(msiVersion)}",
+            "$i=New-Object -ComObject WindowsInstaller.Installer",
+            $"$d=$i.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$i,@('{Database}',0))",
+            $"$v=$d.GetType().InvokeMember('OpenView','InvokeMethod',$null,$d,@({Quote(sql)}))",
+            "$null=$v.GetType().InvokeMember('Execute','InvokeMethod',$null,$v,$null)",
+            "$r=$v.GetType().InvokeMember('Fetch','InvokeMethod',$null,$v,$null)",
+            "$n=$r.GetType().InvokeMember('DataSize','GetProperty',$null,$r,@(1))",
+            "$b=$r.GetType().InvokeMember('ReadStream','InvokeMethod',$null,$r,@(1,$n,2))",
+            $"$t=Join-Path $env:TEMP ('cimian-{actionName}-'+(Get-Random)+'.ps1')",
+            "[IO.File]::WriteAllBytes($t,[Convert]::FromBase64String($b))",
+            "$l=$t+'.log'",
+            "$q=[char]34",
+            $"$p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/c '+$q+$q+'{PsExe}'+$q+' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '+$q+$t+$q+' > '+$q+$l+$q+' 2>&1'+$q) -WindowStyle Hidden -Wait -PassThru",
+            "$rc=$p.ExitCode",
+            "$ErrorActionPreference='Continue'",
+            $"$g=Join-Path $env:ProgramData {Quote(@"ManagedInstalls\logs\packages\" + logDir)}",
+            "$null=New-Item -ItemType Directory -Force -Path $g",
+            $"Copy-Item -LiteralPath $l -Destination (Join-Path $g {Quote(ScriptLogName(actionName) + ".log")}) -Force",
+            "Remove-Item -LiteralPath $t,$l -Force",
+            "exit $rc",
+        };
+        var bootstrap = string.Join(";", steps);
+
+        // Escape for MSI Formatted text, then put the three real properties back.
+        bootstrap = bootstrap.Replace("[", "\u0002").Replace("]", "\u0003")
+            .Replace("\u0002", @"[\[]").Replace("\u0003", @"[\]]")
+            .Replace(InstallDir, "[INSTALLDIR]")
+            .Replace(Database, "[OriginalDatabase]")
+            .Replace(PsExe, "[" + PsExeProperty + "]");
+
+        return $"-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -Command \"{bootstrap}\"";
     }
 
     /// <summary>
@@ -1280,268 +1403,15 @@ public class MsiBuilder
     }
 
     /// <summary>
-    /// Build the VBScript body for a Cimian script custom action. Public so the test
-    /// project can assert on the generated VBS without having to create an MSI database.
-    /// </summary>
-    public static string BuildScriptActionVbs(string actionName, string scriptContent, bool deferred = false)
-    {
-        // <paramref name="deferred"/> switches how the four MSI values the script needs
-        // (INSTALLDIR, REMOVE, ProductVersion, ProductName) are obtained. An immediate CA
-        // reads them straight off the running session via Session.Property(); a deferred CA
-        // runs in the elevated execute-sequence script where Session.Property() returns
-        // empty for everything except CustomActionData, so a companion Type 51 set-property
-        // CA marshals them pipe-delimited into CustomActionData and the VBS Splits them out.
-        // Deferred + no-impersonate is what lets the script run as LocalSystem regardless of
-        // how the MSI was launched (see WriteDeferredScriptAction).
-        //
-        // actionName is interpolated directly into both VBS string literals and the
-        // staged temp-file path, so reject anything that could break either surface.
-        // cimipkg only ever passes the fixed values CimianPreinstall /
-        // CimianPostinstall / CimianUninstall, but the method is public for tests
-        // and we want a loud failure rather than a corrupted MSI if a caller
-        // accidentally passes user-controlled data.
-        if (string.IsNullOrEmpty(actionName))
-        {
-            throw new ArgumentException("actionName must not be null or empty", nameof(actionName));
-        }
-        foreach (var c in actionName)
-        {
-            if (!char.IsLetterOrDigit(c) && c != '_' && c != '-')
-            {
-                throw new ArgumentException(
-                    $"actionName must only contain letters, digits, '_' or '-'; got '{actionName}'",
-                    nameof(actionName));
-            }
-        }
-
-        // Encode as UTF-8 **with BOM** so PowerShell 5.1 reads the file reliably
-        // when invoked via `powershell.exe -File`. Without a BOM, PS 5.1 falls back
-        // to the system ANSI code page and mis-parses Unicode content — and because
-        // we write the bytes via ADODB.Stream in binary mode, there is no automatic
-        // BOM emission. The 3-byte 0xEF 0xBB 0xBF preamble is prepended explicitly
-        // so every staged script opens as UTF-8 regardless of the host locale.
-        //
-        // UTF-8 also nearly halves the base64 transport size compared to UTF-16LE
-        // for ASCII-dominant PowerShell source, which keeps the MSI
-        // CustomAction.Target column well under its LONGCHAR budget for even very
-        // large postinstall scripts.
-        var bom = Encoding.UTF8.GetPreamble(); // 0xEF 0xBB 0xBF
-        var body = Encoding.UTF8.GetBytes(scriptContent);
-        var bytes = new byte[bom.Length + body.Length];
-        Buffer.BlockCopy(bom, 0, bytes, 0, bom.Length);
-        Buffer.BlockCopy(body, 0, bytes, bom.Length, body.Length);
-        var base64 = Convert.ToBase64String(bytes);
-
-        // 800-char chunks keep each VBS source line comfortably under the parser's
-        // ~1022 char hard limit once wrapped in `b64 = b64 & "..."`.
-        const int chunkSize = 800;
-
-        var vbs = new StringBuilder(base64.Length + 4096);
-        vbs.Append("On Error Resume Next\r\n");
-        vbs.Append("Dim ws, fso, xml, node, stream, tmpFile, b64, rc, psExe, sysRoot, progFiles\r\n");
-        vbs.Append("Dim cimianPhase, cimianRemove, cimianInstallDir, cimianVersion, cimianProdName\r\n");
-        vbs.Append("Dim q, cmdLine, logFile, logDir, logStream, logLine, lineCount, prodName, ch\r\n");
-        vbs.Append("Dim cimianData, cimianParts\r\n");
-        vbs.Append("Set ws = CreateObject(\"WScript.Shell\")\r\n");
-        vbs.Append("Set fso = CreateObject(\"Scripting.FileSystemObject\")\r\n");
-        // Obtain the four values the script needs. A deferred CA cannot read arbitrary
-        // properties (Session.Property returns empty except for CustomActionData), so its
-        // companion Type 51 set-property CA stages them pipe-delimited into CustomActionData
-        // as INSTALLDIR|REMOVE|ProductVersion|ProductName — none of which can contain a '|'
-        // (Windows paths, the package version, and the sanitized product name never do, and
-        // REMOVE is only ever "ALL" or empty), so a positional Split round-trips safely.
-        if (deferred)
-        {
-            vbs.Append("cimianData = Session.Property(\"CustomActionData\")\r\n");
-            vbs.Append("cimianInstallDir = \"\" : cimianRemove = \"\" : cimianVersion = \"\" : cimianProdName = \"\"\r\n");
-            vbs.Append("cimianParts = Split(cimianData, \"|\")\r\n");
-            vbs.Append("If UBound(cimianParts) >= 0 Then cimianInstallDir = cimianParts(0)\r\n");
-            vbs.Append("If UBound(cimianParts) >= 1 Then cimianRemove = cimianParts(1)\r\n");
-            vbs.Append("If UBound(cimianParts) >= 2 Then cimianVersion = cimianParts(2)\r\n");
-            vbs.Append("If UBound(cimianParts) >= 3 Then cimianProdName = cimianParts(3)\r\n");
-        }
-        else
-        {
-            vbs.Append("cimianInstallDir = Session.Property(\"INSTALLDIR\")\r\n");
-            vbs.Append("cimianRemove = Session.Property(\"REMOVE\")\r\n");
-            vbs.Append("cimianVersion = Session.Property(\"ProductVersion\")\r\n");
-            vbs.Append("cimianProdName = Session.Property(\"ProductName\")\r\n");
-        }
-        // Surface the MSI INSTALLDIR to PowerShell exactly like sbin-installer
-        // surfaces the extraction dir - preinstall/postinstall scripts can read
-        // $env:CIMIAN_INSTALLDIR (or the injected $payloadRoot variable).
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_INSTALLDIR\") = cimianInstallDir\r\n");
-        // Phase is just install vs uninstall — cimipkg MSIs do not participate
-        // in major upgrades, so PREVIOUSVERSIONSINSTALLED / UPGRADINGPRODUCTCODE
-        // are never populated and the prior "upgrade"/"fresh" branches never
-        // fired meaningfully.
-        vbs.Append("If cimianRemove = \"ALL\" Then\r\n");
-        vbs.Append("  cimianPhase = \"uninstall\"\r\n");
-        vbs.Append("Else\r\n");
-        vbs.Append("  cimianPhase = \"install\"\r\n");
-        vbs.Append("End If\r\n");
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_PHASE\") = cimianPhase\r\n");
-        vbs.Append("ws.Environment(\"Process\")(\"CIMIAN_VERSION\") = cimianVersion\r\n");
-        vbs.Append($"Session.Log \"{actionName}: phase=\" & cimianPhase & \" version=\" & cimianVersion\r\n");
-        //
-        // Resolve the PowerShell runtime at install time so the same cimipkg MSI
-        // works on endpoints with or without PowerShell 7 installed:
-        //   1. Default to powershell.exe 5.1 from %SystemRoot% (guaranteed to be
-        //      present on every supported Windows image, including Server Core).
-        //   2. Upgrade to pwsh.exe 7 if it is installed in the standard path
-        //      (`C:\Program Files\PowerShell\7\pwsh.exe`). We look in the stable
-        //      directory first, then fall through to `7-preview` as a courtesy
-        //      for dev machines; both are official PowerShell install layouts.
-        // Scripts should stay 5.1-safe so they run under either runtime, but
-        // anything added via `#Requires -Version 7` will now execute under pwsh
-        // instead of silently failing under 5.1 when pwsh is installed.
-        //
-        // Probing via `fso.FileExists` is cheap (no disk IO beyond a directory
-        // lookup) and keeps the resolver fully local to the custom action — no
-        // PATH dependency, no registry reads. We expand %SystemRoot% and
-        // %ProgramW6432% at install time so the MSI works on any drive letter.
-        vbs.Append("sysRoot = ws.ExpandEnvironmentStrings(\"%SystemRoot%\")\r\n");
-        vbs.Append("progFiles = ws.ExpandEnvironmentStrings(\"%ProgramW6432%\")\r\n");
-        vbs.Append("psExe = sysRoot & \"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"\r\n");
-        vbs.Append("If fso.FileExists(progFiles & \"\\PowerShell\\7\\pwsh.exe\") Then\r\n");
-        vbs.Append("  psExe = progFiles & \"\\PowerShell\\7\\pwsh.exe\"\r\n");
-        vbs.Append("ElseIf fso.FileExists(progFiles & \"\\PowerShell\\7-preview\\pwsh.exe\") Then\r\n");
-        vbs.Append("  psExe = progFiles & \"\\PowerShell\\7-preview\\pwsh.exe\"\r\n");
-        vbs.Append("End If\r\n");
-        vbs.Append($"Session.Log \"{actionName}: using \" & psExe\r\n");
-        vbs.Append("b64 = \"\"\r\n");
-        for (int i = 0; i < base64.Length; i += chunkSize)
-        {
-            var len = Math.Min(chunkSize, base64.Length - i);
-            vbs.Append("b64 = b64 & \"");
-            vbs.Append(base64, i, len);
-            vbs.Append("\"\r\n");
-        }
-        // MSXML base64 decode -> binary stream -> temp file.
-        // Msxml2.DOMDocument.6.0 and ADODB.Stream are both part of the Windows
-        // base image since XP, so they are available inside the msiexec sandbox.
-        // Clear Err before staging so the check at the end only catches staging
-        // failures (decode/write), not earlier non-fatal errors from e.g. env
-        // variable assignment or fso.FileExists probes.
-        // Seed rc before staging so a staging failure (script never ran) is
-        // indistinguishable from a launch failure at the final exit-code check.
-        vbs.Append("rc = -1\r\n");
-        vbs.Append("Err.Clear\r\n");
-        vbs.Append("Set xml = CreateObject(\"Msxml2.DOMDocument.6.0\")\r\n");
-        vbs.Append("Set node = xml.CreateElement(\"b\")\r\n");
-        vbs.Append("node.DataType = \"bin.base64\"\r\n");
-        vbs.Append("node.Text = b64\r\n");
-        vbs.Append("Set stream = CreateObject(\"ADODB.Stream\")\r\n");
-        vbs.Append("stream.Type = 1\r\n"); // adTypeBinary
-        vbs.Append("stream.Open\r\n");
-        vbs.Append("stream.Write node.NodeTypedValue\r\n");
-        // Millisecond-unique temp path under SYSTEM's %TEMP% (C:\Windows\Temp when elevated).
-        // Using Timer() avoids needing a GUID generator in VBS.
-        vbs.Append($"tmpFile = ws.ExpandEnvironmentStrings(\"%TEMP%\") & \"\\cimian-{actionName}-\" & CLng(Timer * 1000) & \".ps1\"\r\n");
-        vbs.Append("stream.SaveToFile tmpFile, 2\r\n"); // adSaveCreateOverWrite
-        vbs.Append("stream.Close\r\n");
-        vbs.Append("If Err.Number <> 0 Then\r\n");
-        vbs.Append($"  Session.Log \"{actionName}: failed to stage temp script: \" & Err.Description\r\n");
-        vbs.Append("Else\r\n");
-        vbs.Append($"  Session.Log \"{actionName}: running \" & tmpFile\r\n");
-        // ws.Run "powershell.exe" -NoProfile ... -File "<tmpFile>", 0, True
-        // VBS quoting: "" produces a literal " inside a string literal, so """X""" = "X"
-        //
-        // Under `On Error Resume Next` a ws.Run() failure to even START the process
-        // (bad exe path, quoting bug, access denied) does not surface via `rc`;
-        // instead `Err.Number` gets set and `rc` is whatever was there before.
-        // Clear Err + seed rc with a sentinel so we can tell "ws.Run never ran" from
-        // "ws.Run ran and powershell exited with code N".
-        vbs.Append("  Err.Clear\r\n");
-        // psExe is a VBS variable resolved above (pwsh.exe 7 if installed, else
-        // powershell.exe 5.1). Concatenate it into the command line so the
-        // custom action never hard-codes a runtime at MSI build time.
-        //
-        // The script runs through cmd.exe so stdout+stderr can be redirected to a
-        // sidecar log: ws.Run goes straight to CreateProcess, which has no
-        // redirection of its own, and the hidden window means console output is
-        // otherwise lost forever. The log is echoed into Session.Log (visible in
-        // the msiexec /l*v log) and persisted under ManagedInstalls\logs\packages\
-        // so the managing client can drain it into its own run log.
-        vbs.Append("  q = Chr(34)\r\n");
-        vbs.Append("  logFile = tmpFile & \".log\"\r\n");
-        vbs.Append("  cmdLine = \"cmd.exe /c \" & q & q & psExe & q & \" -NoProfile -NonInteractive -ExecutionPolicy Bypass -File \" & q & tmpFile & q & \" > \" & q & logFile & q & \" 2>&1\" & q\r\n");
-        vbs.Append("  rc = ws.Run(cmdLine, 0, True)\r\n");
-        vbs.Append("  If Err.Number <> 0 Then\r\n");
-        vbs.Append($"    Session.Log \"{actionName}: failed to start powershell: \" & Err.Number & \" - \" & Err.Description\r\n");
-        vbs.Append("  Else\r\n");
-        vbs.Append($"    Session.Log \"{actionName}: powershell exit code \" & rc\r\n");
-        vbs.Append("  End If\r\n");
-        // Echo captured script output (capped) and persist a copy for endpoint tooling.
-        vbs.Append("  If fso.FileExists(logFile) Then\r\n");
-        vbs.Append("    Set logStream = fso.OpenTextFile(logFile, 1)\r\n");
-        vbs.Append("    lineCount = 0\r\n");
-        vbs.Append("    Do While Not logStream.AtEndOfStream And lineCount < 200\r\n");
-        vbs.Append("      logLine = logStream.ReadLine\r\n");
-        vbs.Append($"      Session.Log \"{actionName} | \" & logLine\r\n");
-        vbs.Append("      lineCount = lineCount + 1\r\n");
-        vbs.Append("    Loop\r\n");
-        vbs.Append($"    If Not logStream.AtEndOfStream Then Session.Log \"{actionName} | ... output truncated at 200 lines\"\r\n");
-        vbs.Append("    logStream.Close\r\n");
-        // ProductName feeds a filename, so strip the characters NTFS rejects.
-        vbs.Append("    prodName = cimianProdName\r\n");
-        vbs.Append("    For Each ch In Array(\"\\\", \"/\", \":\", \"*\", \"?\", q, \"<\", \">\", \"|\")\r\n");
-        vbs.Append("      prodName = Replace(prodName, ch, \"_\")\r\n");
-        vbs.Append("    Next\r\n");
-        // One directory per package under logs\packages\, rather than a flat
-        // "cimipkg-<product>-<action>.log" per package-and-action at the logs
-        // root. The root is shared with the managing client's own session tree,
-        // and a few dozen never-expiring sidecar logs there make it unreadable.
-        // A per-package directory also gives log retention a unit it can drop
-        // whole once a package is retired.
-        //
-        // CreateFolder cannot create nested paths, so build each level. Failures
-        // here (and in CopyFile) are non-fatal: Session.Log already has the
-        // output, and the temp log is only removed once the copy succeeded.
-        vbs.Append("    logDir = ws.ExpandEnvironmentStrings(\"%ProgramData%\") & \"\\ManagedInstalls\"\r\n");
-        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
-        vbs.Append("    logDir = logDir & \"\\logs\"\r\n");
-        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
-        vbs.Append("    logDir = logDir & \"\\packages\"\r\n");
-        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
-        vbs.Append("    logDir = logDir & \"\\\" & prodName\r\n");
-        vbs.Append("    If Not fso.FolderExists(logDir) Then fso.CreateFolder logDir\r\n");
-        vbs.Append("    Err.Clear\r\n");
-        vbs.Append($"    fso.CopyFile logFile, logDir & \"\\{ScriptLogName(actionName)}.log\", True\r\n");
-        vbs.Append("    If Err.Number = 0 Then\r\n");
-        vbs.Append("      fso.DeleteFile logFile\r\n");
-        vbs.Append("    Else\r\n");
-        vbs.Append($"      Session.Log \"{actionName}: could not persist log copy: \" & Err.Description\r\n");
-        vbs.Append("      Err.Clear\r\n");
-        vbs.Append("    End If\r\n");
-        vbs.Append("  End If\r\n");
-        vbs.Append("  If fso.FileExists(tmpFile) Then fso.DeleteFile tmpFile\r\n");
-        vbs.Append("End If\r\n");
-        // A non-zero script exit must fail the action (and with it the install)
-        // so the managing client records a real failure instead of a phantom
-        // success. rc = -1 covers both "staging failed, script never ran" and
-        // "ws.Run never started powershell". Uninstall scripts stay
-        // best-effort: a broken uninstall script should not wedge removal.
-        vbs.Append("If cimianPhase = \"install\" And rc <> 0 Then\r\n");
-        vbs.Append($"  Session.Log \"{actionName}: script failed (exit \" & rc & \") - failing action\"\r\n");
-        vbs.Append("  On Error GoTo 0\r\n");
-        vbs.Append($"  Err.Raise vbObjectError + 27, \"{actionName}\", \"PowerShell script exited \" & rc\r\n");
-        vbs.Append("End If\r\n");
-
-        return vbs.ToString();
-    }
-
-
-    /// <summary>
     /// Signs a combined PowerShell script at build time so the temp .ps1 written
-    /// by the VBScript custom action at install time already carries a valid
+    /// by the script custom action at install time already carries a valid
     /// Authenticode signature. This prevents EDR/AV false positives from unsigned
     /// scripts executing out of %TEMP%, even when the parent process is msiexec.
     ///
     /// The signature block (<c># SIG # Begin signature block</c> … <c># SIG # End
     /// signature block</c>) is appended to the script content before it is
-    /// base64-encoded into the VBS, so the round-trip is transparent to
-    /// <see cref="BuildScriptActionVbs"/>.
+    /// base64-encoded into the Binary table, so the round-trip is transparent to
+    /// <see cref="WriteScriptBinary"/>.
     /// </summary>
     private string SignScriptContent(string scriptContent, BuildInfo buildInfo)
     {
