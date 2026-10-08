@@ -107,10 +107,12 @@ public static class PowerShellSyntax
     /// assignment that lost its <c>$</c> (a placeholder substitution that
     /// consumed <c>$x64</c> and left <c>x64 = ...</c>) passes the parser and
     /// only fails on the device, at install time. This walks the AST for a
-    /// pipeline that opens with a bare-word command followed by a bare
-    /// <c>=</c> (or <c>+=</c>, <c>-=</c>, ...), or whose bare command name
-    /// itself ends in <c>=</c>, and fails when that name is neither a
-    /// function defined in the script nor a command the build host resolves.
+    /// pipeline that opens with a bare-word command followed by a bare word
+    /// starting with <c>=</c> (or <c>+=</c>, <c>-=</c>, ...), or whose bare
+    /// command name itself contains the <c>=</c> (<c>x64='v'</c> and
+    /// <c>x64=$v</c> tokenize as one word), and fails when the name before
+    /// the <c>=</c> is neither a function defined in the script nor a
+    /// command the build host resolves.
     /// Expects <c>$ast</c> to hold the parsed script; writes
     /// <c>line N: ...</c> lines and exits 1 on a finding.
     /// </summary>
@@ -126,13 +128,13 @@ public static class PowerShellSyntax
         "  $n0 = $el[0]; " +
         "  if (-not ($n0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) -or $n0.StringConstantType -ne $L) { continue } " +
         "  $name = $n0.Value; " +
-        "  $looksAssign = $name -match '[^=]=$'; " +
-        "  if (-not $looksAssign -and $el.Count -ge 2) { " +
+        "  $bare = $null; " +
+        "  if ($name -match '^([^=]+?)[-+*/%]?=') { $bare = $Matches[1] } " +
+        "  elseif ($el.Count -ge 2) { " +
         "    $n1 = $el[1]; " +
-        "    $looksAssign = ($n1 -is [System.Management.Automation.Language.StringConstantExpressionAst]) -and $n1.StringConstantType -eq $L -and $n1.Value -match '^[-+*/%]?=' " +
+        "    if (($n1 -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $n1 -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) -and $n1.StringConstantType -eq $L -and $n1.Extent.Text -match '^[-+*/%]?=') { $bare = $name } " +
         "  } " +
-        "  if (-not $looksAssign) { continue } " +
-        "  $bare = $name.TrimEnd('='); " +
+        "  if (-not $bare) { continue } " +
         "  if ($defined.ContainsKey($bare)) { continue } " +
         "  if ($bare -notmatch '[*?\\[\\]]' -and (Get-Command -Name $bare -ErrorAction SilentlyContinue)) { continue } " +
         "  $bad += (\"line \" + $c.Extent.StartLineNumber + \": '\" + $bare + \" =' calls a command named '\" + $bare + \"', which is not a known command; an assignment needs '$\" + $bare + \"' (check for a placeholder substitution that consumed the '$')\") " +

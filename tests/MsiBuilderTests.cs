@@ -539,10 +539,6 @@ public class MsiBuilderTests
             () => MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "id", maxBytesPerCabinet: -1));
     }
 
-    /// <summary>
-    /// Disposable scratch directory for planner tests that need real files on
-    /// disk (the planner calls FileInfo.Length which requires an actual file).
-    /// </summary>
     [Fact]
     public void CheckEmbeddedScript_AssignmentMissingDollar_FailsTheBuild()
     {
@@ -583,6 +579,10 @@ public class MsiBuilderTests
         }
     }
 
+    /// <summary>
+    /// Disposable scratch directory for planner tests that need real files on
+    /// disk (the planner calls FileInfo.Length which requires an actual file).
+    /// </summary>
     private sealed class TempDir : IDisposable
     {
         public string Path { get; }

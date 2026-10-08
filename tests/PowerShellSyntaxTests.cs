@@ -55,6 +55,10 @@ public class PowerShellSyntaxTests
     [InlineData("x64 = \"C:\\Program Files\"\nexit 0", 1)]
     [InlineData("x64 += 'more'\nexit 0", 1)]
     [InlineData("x64= 'tight'\nexit 0", 1)]
+    [InlineData("x64='C:\\Program Files'\nexit 0", 1)]
+    [InlineData("x64=$env:ProgramFiles\nexit 0", 1)]
+    [InlineData("x64 =$env:ProgramFiles\nexit 0", 1)]
+    [InlineData("x64 -= 1\nexit 0", 1)]
     [InlineData("exit 0\n", 0)]
     [InlineData("if ($true) {\n    x64 = 'nested'\n}\nexit 0", 2)]
     public void TryValidate_AssignmentMissingDollar_FailsWithLineNumber(string script, int line)
