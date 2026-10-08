@@ -482,19 +482,7 @@ public class MsiBuilder
         string buildInfoYaml,
         bool isInstallerType)
     {
-        void SetProperty(string name, string value)
-        {
-            try
-            {
-                var sql = $"INSERT INTO `Property` (`Property`, `Value`) VALUES ('{EscSql(name)}', '{EscSql(value)}')";
-                db.Execute(sql);
-            }
-            catch (Exception ex)
-            {
-                throw new InvalidOperationException(
-                    $"Failed to set property '{name}' (value length={value.Length}): {ex.Message}", ex);
-            }
-        }
+        void SetProperty(string name, string value) => InsertProperty(db, name, value);
 
         // Standard MSI properties.
         // UpgradeCode drives same-product supersession via the Upgrade table
@@ -544,7 +532,7 @@ public class MsiBuilder
 
         // ARP (Add/Remove Programs) properties
         if (!string.IsNullOrEmpty(buildInfo.Product.Description))
-            SetProperty("ARPCOMMENTS", buildInfo.Product.Description);
+            SetProperty("ARPCOMMENTS", SanitizeArpText(buildInfo.Product.Description));
         if (!string.IsNullOrEmpty(buildInfo.Product.Url))
             SetProperty("ARPURLINFOABOUT", buildInfo.Product.Url);
 
@@ -593,6 +581,65 @@ public class MsiBuilder
             }
         }
         SetProperty("SecureCustomProperties", string.Join(";", secureProps));
+    }
+
+    /// <summary>
+    /// Inserts one Property row. The name and value are bound as record parameters
+    /// rather than spliced into the SQL text, so no value can break the MSI SQL
+    /// parser. A long build-info description spliced in as a quoted literal failed
+    /// the whole build with "SQL query syntax invalid or unsupported".
+    /// </summary>
+    internal static void InsertProperty(Database db, string name, string value)
+    {
+        try
+        {
+            using var record = new Record(name, value);
+            db.Execute("INSERT INTO `Property` (`Property`, `Value`) VALUES (?, ?)", record);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException(
+                $"Failed to set property '{name}' (value length={value.Length}): {ex.Message}", ex);
+        }
+    }
+
+    /// <summary>Longest ARPCOMMENTS value written; longer descriptions are truncated.</summary>
+    internal const int ArpTextMaxLength = 255;
+
+    /// <summary>
+    /// Flattens free text for a single-line Add/Remove Programs field: control
+    /// characters (CR, LF, tab and the rest) become spaces, whitespace runs collapse
+    /// to one space, and the result is capped at <paramref name="maxLength"/>
+    /// characters with a trailing ellipsis, so a long or multi-line description
+    /// degrades to a readable one-liner instead of breaking the build.
+    /// </summary>
+    internal static string SanitizeArpText(string value, int maxLength = ArpTextMaxLength)
+    {
+        if (string.IsNullOrEmpty(value)) return string.Empty;
+
+        var sb = new StringBuilder(value.Length);
+        var pendingSpace = false;
+        foreach (var ch in value)
+        {
+            if (char.IsControl(ch) || char.IsWhiteSpace(ch))
+            {
+                pendingSpace = sb.Length > 0;
+                continue;
+            }
+            if (pendingSpace)
+            {
+                sb.Append(' ');
+                pendingSpace = false;
+            }
+            sb.Append(ch);
+        }
+
+        if (sb.Length <= maxLength) return sb.ToString();
+
+        const string ellipsis = "...";
+        var cut = Math.Max(0, maxLength - ellipsis.Length);
+        if (cut > 0 && char.IsHighSurrogate(sb[cut - 1])) cut--;
+        return sb.ToString(0, cut).TrimEnd() + ellipsis;
     }
 
     /// <summary>
