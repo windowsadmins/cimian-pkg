@@ -539,6 +539,46 @@ public class MsiBuilderTests
             () => MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "id", maxBytesPerCabinet: -1));
     }
 
+    [Fact]
+    public void CheckEmbeddedScript_AssignmentMissingDollar_FailsTheBuild()
+    {
+        // `x64 = ...` parses (it is a call to a command named x64), so a
+        // parse-only check let it through; the build must refuse it.
+        var script = "param([string]$Path)\nx64 = 'C:\\Program Files'\nexit 0";
+
+        var ex = Assert.Throws<InvalidOperationException>(
+            () => MsiBuilder.CheckEmbeddedScript("CimianPreinstall", script));
+
+        Assert.Contains("CimianPreinstall", ex.Message);
+        Assert.Contains("line 2", ex.Message);
+        Assert.Contains("CIMIAN_PKG_SKIP_SCRIPT_VALIDATION", ex.Message);
+    }
+
+    [Fact]
+    public void CheckEmbeddedScript_ValidScript_Passes()
+    {
+        var script = "param([string]$Path)\n$x64 = 'C:\\Program Files'\nexit 0";
+
+        MsiBuilder.CheckEmbeddedScript("CimianPostinstall", script);
+    }
+
+    [Fact]
+    public void CheckEmbeddedScript_SkipEnvVar_BypassesValidation()
+    {
+        const string name = "CIMIAN_PKG_SKIP_SCRIPT_VALIDATION";
+        var original = Environment.GetEnvironmentVariable(name);
+        Environment.SetEnvironmentVariable(name, "1");
+        try
+        {
+            var note = MsiBuilder.CheckEmbeddedScript("CimianPreinstall", "x64 = 'C:\\Program Files'");
+            Assert.Equal(string.Empty, note);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(name, original);
+        }
+    }
+
     /// <summary>
     /// Disposable scratch directory for planner tests that need real files on
     /// disk (the planner calls FileInfo.Length which requires an actual file).
