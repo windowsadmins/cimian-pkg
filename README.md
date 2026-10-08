@@ -119,7 +119,7 @@ The default output format. Builds native Windows Installer packages through msi.
 
 1. Creates MSI tables (Property, Directory, Component, File, Media, Feature, etc.)
 2. Embeds payload files in a compressed CAB archive
-3. Converts PowerShell scripts to VBScript custom actions (base64-encoded, chunked — supports scripts of any practical size)
+3. Stores each PowerShell script in the Binary table and runs it through an exe custom action that launches PowerShell directly — no VBScript, so packages install on Windows images without the VBScript feature
 4. **Authenticode-signs embedded scripts** if a signing certificate is configured — the temp `.ps1` written at install time already carries a valid signature, preventing EDR/AV false positives
 5. Stores the full `build-info.yaml` in the `CIMIAN_PKG_BUILD_INFO` MSI property for metadata round-trip
 6. Generates a deterministic `UpgradeCode` from the product identifier (stable across versions)
