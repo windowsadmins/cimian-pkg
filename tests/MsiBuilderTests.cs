@@ -9,7 +9,7 @@ using Xunit;
 namespace Cimian.Tests.Cimipkg;
 
 /// <summary>
-/// Tests for MsiBuilder, specifically the VBScript custom action generator.
+/// Tests for MsiBuilder: table authoring, the script custom actions and the cabinet planner.
 ///
 /// Regression context: RenderingManager v2026.04.10.1431 shipped with a broken
 /// postinstall custom action because the previous implementation inlined the
@@ -21,12 +21,6 @@ namespace Cimian.Tests.Cimipkg;
 /// </summary>
 public class MsiBuilderTests
 {
-    // VBS parser has a hard limit around 1022 chars per source line. Anything
-    // approaching that is a ticking time bomb, so we assert an aggressive
-    // safety margin of 1000 chars to leave headroom for the `b64 = b64 & "..."`
-    // wrapper overhead.
-    private const int VbsPerLineSafeLimit = 1000;
-
     [Fact]
     public void WriteDirectoryTable_KnownFolderRoot_EmitsValidInstallDir()
     {
@@ -74,328 +68,158 @@ public class MsiBuilderTests
         }
     }
 
-    [Fact]
-    public void BuildScriptActionVbs_TinyScript_ProducesValidVbs()
-    {
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "Write-Host 'hello'");
+    // =========================================================================
+    // Script custom actions. Each script lives in the Binary table and runs
+    // through an exe custom action whose -Command is a short bootstrap; there is
+    // no VBScript. The command line is MSI Formatted text, so these tests pin
+    // the escaping that keeps it intact.
+    // =========================================================================
 
-        AssertAllLinesUnderLimit(vbs);
-        Assert.Contains("powershell.exe", vbs);
-        Assert.Contains("-File", vbs);
-        Assert.Contains("Msxml2.DOMDocument.6.0", vbs);
-        Assert.Contains("ADODB.Stream", vbs);
-        Assert.Contains("stream.SaveToFile", vbs);
-        Assert.Contains("cimian-CimianPostinstall-", vbs);
+    private static string CommandLine(string action = "CimianPostinstall", string phase = "install",
+        string product = "Contoso Widget", string version = "2026.10.8") =>
+        MsiBuilder.BuildScriptActionCommandLine(action, phase, product, version);
+
+    /// <summary>
+    /// What Windows Installer would hand PowerShell: escapes resolved and the
+    /// three properties replaced with sample values.
+    /// </summary>
+    private static string Formatted(string commandLine) => commandLine
+        .Replace(@"[\[]", "\u0002").Replace(@"[\]]", "\u0003")
+        .Replace("[INSTALLDIR]", @"C:\Program Files\Contoso\")
+        .Replace("[OriginalDatabase]", @"C:\Windows\Installer\1a2b3c.msi")
+        .Replace("[CIMIAN_PSEXE]", @"C:\Program Files\PowerShell\7\pwsh.exe")
+        .Replace("\u0002", "[").Replace("\u0003", "]");
+
+    private static string Bootstrap(string commandLine)
+    {
+        const string marker = "-Command \"";
+        var start = commandLine.IndexOf(marker, StringComparison.Ordinal) + marker.Length;
+        Assert.EndsWith("\"", commandLine);
+        return commandLine.Substring(start, commandLine.Length - start - 1);
     }
 
     [Fact]
-    public void BuildScriptActionVbs_LargeScript_StaysUnderVbsParserLimit()
+    public void CommandLine_ExpandsOnlyItsThreeProperties()
     {
-        // RenderingManager's real postinstall is ~15 KB and that's what broke
-        // the previous implementation. Go a bit bigger to add safety margin.
-        // Note: the script is transported through the VBS as UTF-8 with a BOM
-        // (not UTF-16LE), so 20 KB of PS source stays ~20 KB after UTF-8
-        // encoding and produces ~27 KB of base64 before chunking.
-        var largeScript = BuildLargePowerShellScript(20_000);
+        var cmd = CommandLine();
+        var withoutEscapes = cmd.Replace(@"[\[]", "").Replace(@"[\]]", "");
 
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", largeScript);
+        var properties = System.Text.RegularExpressions.Regex.Matches(withoutEscapes, @"\[([^\]]*)\]")
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .OrderBy(p => p, StringComparer.Ordinal)
+            .ToArray();
 
-        AssertAllLinesUnderLimit(vbs);
-
-        // Sanity: the VBS must actually contain the chunked base64 assignment,
-        // not just a single huge line.
-        var chunkLines = vbs
-            .Replace("\r\n", "\n")
-            .Split('\n')
-            .Count(l => l.StartsWith("b64 = b64 & \""));
-        Assert.True(chunkLines >= 2,
-            $"Expected at least 2 base64 chunks for a 20 KB script, got {chunkLines}");
+        Assert.Equal(new[] { "CIMIAN_PSEXE", "INSTALLDIR", "OriginalDatabase" }, properties);
     }
 
     [Fact]
-    public void BuildScriptActionVbs_ExtremelyLargeScript_StillValid()
+    public void CommandLine_BootstrapHasNoDoubleQuotesOrBraces()
     {
-        // 60 KB PowerShell source -> ~60 KB UTF-8 (with BOM) -> ~80 KB base64.
-        // Still has to chunk down to <1000 char lines.
-        var huge = BuildLargePowerShellScript(60_000);
+        // The bootstrap is one double-quoted -Command argument, and braces are
+        // MSI Formatted syntax, so neither may appear inside it.
+        var bootstrap = Bootstrap(CommandLine(product: "Bob's \"Widget\" {beta}"));
 
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPreinstall", huge);
+        Assert.DoesNotContain("\"", bootstrap);
+        Assert.DoesNotContain("{", bootstrap);
+        Assert.DoesNotContain("}", bootstrap);
+    }
 
-        AssertAllLinesUnderLimit(vbs);
+    [Theory]
+    [InlineData("CimianPreinstall", "install")]
+    [InlineData("CimianPostinstall", "install")]
+    [InlineData("CimianUninstall", "uninstall")]
+    public void CommandLine_BootstrapParsesAsPowerShell(string action, string phase)
+    {
+        var bootstrap = Formatted(Bootstrap(CommandLine(action, phase, product: "Bob's Widget")));
+
+        Assert.True(PowerShellSyntax.TryValidate(bootstrap, out var errors), errors);
     }
 
     [Fact]
-    public void BuildScriptActionVbs_RoundTrip_PreservesScriptContentExactly()
+    public void CommandLine_ReadsItsOwnBinaryRowAndLaunchesTheResolvedRuntime()
     {
-        // Pick a script with characters that would otherwise need escaping in VBS
-        // string literals (quotes, backslashes, Unicode via UTF-8, newlines).
-        var original =
-            "# Cimian postinstall\r\n" +
-            "$path = 'C:\\Program Files\\Foo\\bar.exe'\r\n" +
-            "Write-Host \"Installing to $path\"\r\n" +
-            "if (Test-Path $path) { Write-Host 'already there' }\r\n" +
-            "Get-ScheduledTask | Where-Object { $_.Name -eq 'X' }\r\n" +
-            // Some unicode to make sure UTF-8 round-trips correctly.
-            "# emoji: \u2713 check mark\r\n";
+        var bootstrap = Formatted(Bootstrap(CommandLine("CimianPreinstall")));
 
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", original);
-
-        var reconstructed = ReconstructScriptFromVbs(vbs);
-        Assert.Equal(original, reconstructed);
+        Assert.Contains("WHERE `Name`=''CimianPreinstall''", bootstrap);
+        Assert.Contains(@"'C:\Windows\Installer\1a2b3c.msi'", bootstrap);
+        Assert.Contains(@"'C:\Program Files\PowerShell\7\pwsh.exe'", bootstrap);
+        Assert.Contains("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File", bootstrap);
+        Assert.Contains("exit $rc", bootstrap);
     }
 
     [Fact]
-    public void BuildScriptActionVbs_EmbedsActionNameInTempPath()
+    public void CommandLine_SetsTheScriptEnvironment()
     {
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPreinstall", "exit 0");
-        Assert.Contains("\\cimian-CimianPreinstall-", vbs);
+        var bootstrap = Formatted(Bootstrap(CommandLine("CimianUninstall", "uninstall", version: "1.2.3")));
 
-        var vbs2 = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-        Assert.Contains("\\cimian-CimianPostinstall-", vbs2);
+        Assert.Contains(@"$env:CIMIAN_INSTALLDIR='C:\Program Files\Contoso\'", bootstrap);
+        Assert.Contains("$env:CIMIAN_PHASE='uninstall'", bootstrap);
+        Assert.Contains("$env:CIMIAN_VERSION='1.2.3'", bootstrap);
+    }
+
+    [Fact]
+    public void CommandLine_PersistsLogUnderPerPackageDirectory()
+    {
+        var bootstrap = Formatted(Bootstrap(CommandLine("CimianPostinstall", product: "Bob's Widget: Pro")));
+
+        // NTFS-illegal characters become '_', and the apostrophe is doubled for PowerShell.
+        Assert.Contains(@"'ManagedInstalls\logs\packages\Bob''s Widget_ Pro'", bootstrap);
+        Assert.Contains("'postinstall.log'", bootstrap);
     }
 
     [Theory]
     [InlineData("")]
-    [InlineData("bad name")]          // space
-    [InlineData("bad/name")]          // path separator
-    [InlineData("bad\\name")]         // path separator
-    [InlineData("bad\"name")]         // quote that would break VBS string literal
-    [InlineData("bad;name")]          // VBS statement separator
-    [InlineData("..\\escape")]        // directory traversal attempt
-    public void BuildScriptActionVbs_RejectsUnsafeActionNames(string badName)
+    [InlineData("Bad Name")]
+    [InlineData("Bad'Name")]
+    [InlineData("Bad;Name")]
+    public void CommandLine_RejectsUnsafeActionNames(string badName)
     {
-        // actionName is interpolated directly into VBS string literals and the
-        // staged temp file path. The method must refuse anything that could
-        // break either surface rather than silently producing a corrupted
-        // custom action or writing outside %TEMP%.
-        var ex = Assert.ThrowsAny<ArgumentException>(
-            () => MsiBuilder.BuildScriptActionVbs(badName, "exit 0"));
-        Assert.Equal("actionName", ex.ParamName);
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_EmitsPwshRuntimeDetection()
-    {
-        // The custom action must resolve the PowerShell runtime at install time
-        // rather than baking a specific path into the MSI at build time. This
-        // lets the same cimipkg MSI work on endpoints whether or not
-        // PowerShell 7 is installed: pwsh.exe is preferred when present,
-        // otherwise it falls back to the 5.1 powershell.exe that ships with
-        // every supported Windows image.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-
-        // Paths must be resolved via env expansion at install time, not hardcoded
-        // to C:\ — ensures the MSI works regardless of OS drive letter.
-        Assert.Contains("ws.ExpandEnvironmentStrings(\"%SystemRoot%\")", vbs);
-        Assert.Contains("ws.ExpandEnvironmentStrings(\"%ProgramW6432%\")", vbs);
-        // Fallback to 5.1 via %SystemRoot%
-        Assert.Contains("sysRoot & \"\\System32\\WindowsPowerShell\\v1.0\\powershell.exe\"", vbs);
-        // Upgrade to pwsh 7 via %ProgramW6432%
-        Assert.Contains("progFiles & \"\\PowerShell\\7\\pwsh.exe\"", vbs);
-        // 7-preview is probed as a courtesy for dev machines.
-        Assert.Contains("7-preview", vbs);
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_WsRunUsesPsExeVariableNotHardcodedPath()
-    {
-        // Regression guard: previous revisions interpolated the powershell.exe
-        // path as a literal into the ws.Run command line, baking PS 5.1 into
-        // every MSI at build time. The resolver-based design must use the
-        // runtime-resolved psExe variable instead.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-
-        // The command line must concatenate psExe, not embed a literal
-        // powershell.exe path directly inside the string literal.
-        Assert.Contains("& psExe &", vbs);
-        Assert.Contains("ws.Run(cmdLine, 0, True)", vbs);
-
-        // And the only literal mentions of the 5.1 path should be the
-        // fallback assignment - not part of the executed command line.
-        var cmdLines = vbs
-            .Replace("\r\n", "\n")
-            .Split('\n')
-            .Where(l => l.Contains("ws.Run(") || l.Contains("cmdLine = "))
-            .ToList();
-        Assert.NotEmpty(cmdLines);
-        foreach (var line in cmdLines)
-        {
-            Assert.DoesNotContain("WindowsPowerShell\\v1.0\\powershell.exe", line);
-            Assert.DoesNotContain("PowerShell\\7\\pwsh.exe", line);
-        }
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_CapturesScriptOutputToSidecarLog()
-    {
-        // The script runs hidden under msiexec, so without redirection its
-        // output is lost forever. The custom action must route stdout+stderr
-        // to a sidecar log, echo it into Session.Log, and persist a copy under
-        // ManagedInstalls\logs for endpoint tooling to surface.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-
-        Assert.Contains("logFile = tmpFile & \".log\"", vbs);
-        Assert.Contains("2>&1", vbs);
-        Assert.Contains("\\ManagedInstalls", vbs);
-        // ProductName feeds a filename and must be sanitized first.
-        Assert.Contains("prodName = Replace(prodName, ch, \"_\")", vbs);
-        // The temp log must survive a failed persistence copy (output would
-        // otherwise be lost), so deletion is gated on CopyFile succeeding.
-        Assert.Contains("If Err.Number = 0 Then", vbs);
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_PersistsLogUnderPerPackageDirectory()
-    {
-        // The logs root belongs to the managing client's session tree. Sidecar
-        // logs go in logs\packages\<ProductName>\, one directory per package,
-        // so the root stays readable and retention can drop a retired package
-        // in one move.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-
-        Assert.Contains("logDir = logDir & \"\\logs\"", vbs);
-        Assert.Contains("logDir = logDir & \"\\packages\"", vbs);
-        Assert.Contains("logDir = logDir & \"\\\" & prodName", vbs);
-        Assert.Contains("fso.CopyFile logFile, logDir & \"\\postinstall.log\", True", vbs);
-        // The old flat name must be gone - it is what made the logs root
-        // unreadable in the first place.
-        Assert.DoesNotContain("\\cimipkg-\" & prodName", vbs);
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_SpellsTheLogsDirectoryInLowercase()
-    {
-        // NTFS folds "Logs" and "logs" into one directory, so a capital L only shows
-        // up once something treats the path as data - a case-sensitive log shipper,
-        // or a mirror of the tree on another filesystem. Every writer must agree on
-        // the lowercase name the managing client defines.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
-
-        Assert.Contains("\\logs", vbs);
-        Assert.DoesNotContain("\\Logs", vbs);
+        Assert.Throws<ArgumentException>(() => CommandLine(badName));
     }
 
     [Theory]
     [InlineData("CimianPreinstall", "preinstall")]
     [InlineData("CimianPostinstall", "postinstall")]
     [InlineData("CimianUninstall", "uninstall")]
-    [InlineData("SomethingElse", "somethingelse")]
+    [InlineData("Custom", "custom")]
     public void ScriptLogName_DropsCimianPrefixAndLowercases(string actionName, string expected)
     {
         Assert.Equal(expected, MsiBuilder.ScriptLogName(actionName));
     }
 
     [Fact]
-    public void BuildScriptActionVbs_FailsActionOnNonZeroExit_InstallPhaseOnly()
+    public void EncodeScript_IsBase64OfUtf8WithBom()
     {
-        // A failing install-phase script must fail the MSI (no more phantom
-        // successes that installchecks refute forever - the WinAdminsAccount
-        // install-loop incident). Uninstall scripts stay best-effort so a
-        // broken uninstall script cannot wedge product removal.
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0");
+        const string script = "Write-Output 'héllo [x] {y}'\r\nexit 3";
 
-        Assert.Contains("If cimianPhase = \"install\" And rc <> 0 Then", vbs);
-        Assert.Contains("Err.Raise", vbs);
-        // The raise must escape the script-wide On Error Resume Next, or it
-        // would be silently swallowed like everything else.
-        Assert.Contains("On Error GoTo 0", vbs);
+        var bytes = Convert.FromBase64String(MsiBuilder.EncodeScript(script));
+
+        Assert.Equal(Encoding.UTF8.GetPreamble(), bytes.Take(3).ToArray());
+        Assert.Equal(script, Encoding.UTF8.GetString(bytes, 3, bytes.Length - 3));
     }
 
     [Fact]
-    public void BuildScriptActionVbs_Deferred_ReadsPropertiesFromCustomActionData()
+    public void ScriptBinary_StoresTheEncodedScriptUnderItsActionName()
     {
-        // A deferred custom action runs in the elevated execute-sequence script where
-        // Session.Property() returns empty for everything except CustomActionData. The
-        // companion Type 51 CA stages INSTALLDIR|REMOVE|ProductVersion|ProductName there, so
-        // the deferred VBS must parse CustomActionData and must NOT call Session.Property for
-        // those four values (it would silently get empty strings and mis-handle the payload
-        // root / phase / log name).
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPostinstall", "exit 0", deferred: true);
-
-        Assert.Contains("Session.Property(\"CustomActionData\")", vbs);
-        Assert.Contains("Split(cimianData, \"|\")", vbs);
-        Assert.DoesNotContain("Session.Property(\"INSTALLDIR\")", vbs);
-        Assert.DoesNotContain("Session.Property(\"REMOVE\")", vbs);
-        Assert.DoesNotContain("Session.Property(\"ProductVersion\")", vbs);
-        Assert.DoesNotContain("Session.Property(\"ProductName\")", vbs);
-        // Phase still derives from the (now marshaled) REMOVE value.
-        Assert.Contains("If cimianRemove = \"ALL\" Then", vbs);
-        // And the install-phase failure guard is unchanged.
-        Assert.Contains("If cimianPhase = \"install\" And rc <> 0 Then", vbs);
-        AssertAllLinesUnderLimit(vbs);
-    }
-
-    [Fact]
-    public void BuildScriptActionVbs_Immediate_ReadsPropertiesFromSession()
-    {
-        // The immediate variant (preinstall) runs in the launching session and reads the
-        // properties directly — it must NOT depend on CustomActionData (no Type 51 companion
-        // stages it for an immediate action).
-        var vbs = MsiBuilder.BuildScriptActionVbs("CimianPreinstall", "exit 0");
-
-        Assert.Contains("Session.Property(\"INSTALLDIR\")", vbs);
-        Assert.Contains("Session.Property(\"REMOVE\")", vbs);
-        Assert.Contains("Session.Property(\"ProductName\")", vbs);
-        Assert.DoesNotContain("Session.Property(\"CustomActionData\")", vbs);
-        AssertAllLinesUnderLimit(vbs);
-    }
-
-    private static void AssertAllLinesUnderLimit(string vbs)
-    {
-        var lines = vbs.Replace("\r\n", "\n").Split('\n');
-        for (int i = 0; i < lines.Length; i++)
+        var msi = Path.Combine(Path.GetTempPath(), $"cimipkg-binary-{Guid.NewGuid():N}.msi");
+        try
         {
-            Assert.True(
-                lines[i].Length <= VbsPerLineSafeLimit,
-                $"VBS line {i + 1} is {lines[i].Length} chars (limit {VbsPerLineSafeLimit}). " +
-                $"This would trip the VBScript parser at install time. " +
-                $"Line preview: {lines[i].Substring(0, Math.Min(80, lines[i].Length))}...");
-        }
-    }
+            using (var db = MsiDatabase.Open(msi, MsiOpenMode.Create))
+            {
+                MsiBuilder.CreateTables(db);
+                MsiBuilder.WriteScriptBinary(db, "CimianPostinstall", "exit 0");
+                db.Commit();
+            }
 
-    /// <summary>
-    /// Extract the base64 chunks from the generated VBS, decode them, and
-    /// rebuild the original PowerShell source. This mirrors what the real
-    /// custom action does at install time (via MSXML + ADODB.Stream) so a
-    /// passing round-trip proves the whole pipeline preserves script bytes.
-    /// </summary>
-    private static string ReconstructScriptFromVbs(string vbs)
-    {
-        var b64 = new StringBuilder();
-        foreach (var line in vbs.Replace("\r\n", "\n").Split('\n'))
-        {
-            // Lines look like: b64 = b64 & "AAAA...ZZZZ"
-            const string prefix = "b64 = b64 & \"";
-            if (!line.StartsWith(prefix)) continue;
-            if (!line.EndsWith("\"")) continue;
-            var chunk = line.Substring(prefix.Length, line.Length - prefix.Length - 1);
-            b64.Append(chunk);
+            using var read = MsiDatabase.Open(msi, MsiOpenMode.ReadOnly);
+            Assert.Equal("CimianPostinstall",
+                read.ExecuteScalar("SELECT `Name` FROM `Binary` WHERE `Name` = ?", "CimianPostinstall"));
         }
-
-        var bytes = Convert.FromBase64String(b64.ToString());
-        // The VBS reconstructs UTF-8 bytes with a 3-byte BOM prefix. Strip the BOM
-        // so the round-trip compares against the caller's original script content,
-        // not a BOM-prefixed variant of it.
-        var bom = Encoding.UTF8.GetPreamble();
-        Assert.True(bytes.Length >= bom.Length, "Emitted payload is smaller than the UTF-8 BOM");
-        for (int i = 0; i < bom.Length; i++)
+        finally
         {
-            Assert.Equal(bom[i], bytes[i]);
+            File.Delete(msi);
         }
-        return Encoding.UTF8.GetString(bytes, bom.Length, bytes.Length - bom.Length);
-    }
-
-    private static string BuildLargePowerShellScript(int approxBytes)
-    {
-        var sb = new StringBuilder(approxBytes + 1024);
-        sb.AppendLine("# Generated test script");
-        sb.AppendLine("$ErrorActionPreference = 'Stop'");
-        var line = "Write-Host \"This is a representative postinstall line that does not run but fills space.\"\r\n";
-        while (sb.Length < approxBytes)
-        {
-            sb.Append(line);
-        }
-        return sb.ToString();
     }
 
     // =========================================================================
