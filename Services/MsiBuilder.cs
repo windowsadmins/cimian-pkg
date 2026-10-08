@@ -2,7 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using Cimian.CLI.Cimipkg.Models;
 using Microsoft.Extensions.Logging;
-using WixToolset.Dtf.WindowsInstaller;
+using Cimian.CLI.Cimipkg.Services.Msi;
 using YamlDotNet.Serialization;
 
 namespace Cimian.CLI.Cimipkg.Services;
@@ -247,7 +247,7 @@ public class MsiBuilder
         IReadOnlyList<CabinetSegment> cabPlan = Array.Empty<CabinetSegment>();
 
         // Create the MSI database
-        using (var db = new Database(msiPath, DatabaseOpenMode.Create))
+        using (var db = MsiDatabase.Open(msiPath, MsiOpenMode.Create))
         {
             _logger.LogDebug("Creating tables...");
             CreateTables(db);
@@ -347,7 +347,7 @@ public class MsiBuilder
         return msiPath;
     }
 
-    internal static void CreateTables(Database db)
+    internal static void CreateTables(MsiDatabase db)
     {
         // Property table
         db.Execute("CREATE TABLE `Property` (`Property` CHAR(72) NOT NULL, `Value` LONGCHAR LOCALIZABLE PRIMARY KEY `Property`)");
@@ -425,7 +425,7 @@ public class MsiBuilder
     /// to suppress all checks — kill switch for a misbehaving condition in the
     /// field. The tables themselves are still created so the schema is stable.
     /// </summary>
-    private static void WriteLaunchConditions(Database db)
+    private static void WriteLaunchConditions(MsiDatabase db)
     {
         if (Environment.GetEnvironmentVariable("CIMIAN_PKG_DISABLE_LAUNCH_CONDITIONS") == "1")
         {
@@ -456,22 +456,22 @@ public class MsiBuilder
 
     private static void WriteSummaryInfo(string msiPath, string productName, string msiVersion, BuildInfo buildInfo)
     {
-        using var si = new SummaryInfo(msiPath, enableWrite: true);
-        si.Title = "Installation Database";
-        si.Subject = productName;
-        si.Author = buildInfo.Product.Developer ?? "Cimian";
-        si.Comments = buildInfo.Product.Description ?? $"{productName} installer";
-        si.Template = "x64;1033"; // x64 platform, English
-        si.RevisionNumber = $"{{{Guid.NewGuid()}}}"; // Package code (unique per MSI file)
-        si.CreatingApp = "cimipkg";
-        si.PageCount = 200; // Minimum installer version (2.0)
-        si.WordCount = 2; // Bit 1 = compressed source files (CAB embedded)
-        si.Security = 2; // Read-only recommended
+        using var si = MsiSummaryInfo.Open(msiPath, enableWrite: true);
+        si.SetString(MsiSummaryInfo.PID_TITLE, "Installation Database");
+        si.SetString(MsiSummaryInfo.PID_SUBJECT, productName);
+        si.SetString(MsiSummaryInfo.PID_AUTHOR, buildInfo.Product.Developer ?? "Cimian");
+        si.SetString(MsiSummaryInfo.PID_COMMENTS, buildInfo.Product.Description ?? $"{productName} installer");
+        si.SetString(MsiSummaryInfo.PID_TEMPLATE, "x64;1033"); // x64 platform, English
+        si.SetString(MsiSummaryInfo.PID_REVNUMBER, $"{{{Guid.NewGuid()}}}"); // Package code (unique per MSI file)
+        si.SetString(MsiSummaryInfo.PID_APPNAME, "cimipkg");
+        si.SetInteger(MsiSummaryInfo.PID_PAGECOUNT, 200); // Minimum installer version (2.0)
+        si.SetInteger(MsiSummaryInfo.PID_WORDCOUNT, 2); // Bit 1 = compressed source files (CAB embedded)
+        si.SetInteger(MsiSummaryInfo.PID_SECURITY, 2); // Read-only recommended
         si.Persist();
     }
 
     private static void WriteProperties(
-        Database db,
+        MsiDatabase db,
         string productName,
         string msiVersion,
         string fullVersion,
@@ -615,7 +615,7 @@ public class MsiBuilder
     /// removed this machinery to avoid.
     /// </summary>
     internal static void WriteUpgradeTable(
-        Database db,
+        MsiDatabase db,
         Guid upgradeCode,
         IEnumerable<Guid>? supersedes = null)
     {
@@ -642,7 +642,7 @@ public class MsiBuilder
         }
     }
 
-    internal static void WriteDirectoryTable(Database db, string installLocation, bool isInstallerType, string productName)
+    internal static void WriteDirectoryTable(MsiDatabase db, string installLocation, bool isInstallerType, string productName)
     {
         db.Execute("INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('TARGETDIR', '', 'SourceDir')");
 
@@ -709,7 +709,7 @@ public class MsiBuilder
     }
 
     private void WritePayloadTables(
-        Database db,
+        MsiDatabase db,
         IReadOnlyList<CabinetSegment> segments,
         string msiVersion)
     {
@@ -830,7 +830,7 @@ public class MsiBuilder
         }
     }
 
-    private static void WriteEmptyFeature(Database db)
+    private static void WriteEmptyFeature(MsiDatabase db)
     {
         db.Execute(
             "INSERT INTO `Feature` (`Feature`, `Feature_Parent`, `Title`, `Description`, `Display`, `Level`, `Directory_`, `Attributes`) VALUES ('DefaultFeature', '', 'Complete', 'Full installation', 1, 1, 'INSTALLDIR', 0)");
@@ -855,7 +855,7 @@ public class MsiBuilder
         db.Execute("INSERT INTO `FeatureComponents` (`Feature_`, `Component_`) VALUES ('DefaultFeature', 'C_CimianMarker')");
     }
 
-    internal static void WriteInstallSequence(Database db, bool hasScripts, bool hasPayload)
+    internal static void WriteInstallSequence(MsiDatabase db, bool hasScripts, bool hasPayload)
     {
         void AddAction(string action, string? condition, int sequence)
         {
@@ -1054,7 +1054,7 @@ public class MsiBuilder
     }
 
     private void WriteScriptCustomActions(
-        Database db,
+        MsiDatabase db,
         string scriptsDir,
         Dictionary<string, string> envVars,
         string installDir,
@@ -1207,7 +1207,7 @@ public class MsiBuilder
     /// normal VBS variable built from many short <c>&amp;</c> concatenations, then
     /// only the short temp-file path is passed to <c>powershell.exe</c>.
     /// </summary>
-    private static void WriteImmediateScriptAction(Database db, string actionName, string scriptContent)
+    private static void WriteImmediateScriptAction(MsiDatabase db, string actionName, string scriptContent)
     {
         var vbsStr = BuildScriptActionVbs(actionName, scriptContent);
         // Type 38 = inline VBScript (Target column), immediate. Used only for
@@ -1244,7 +1244,7 @@ public class MsiBuilder
     /// install-phase script must fail — and now cleanly roll back — the MSI, because the
     /// deferred action runs before InstallFinalize commits.
     /// </summary>
-    private static void WriteDeferredScriptAction(Database db, string actionName, string scriptContent)
+    private static void WriteDeferredScriptAction(MsiDatabase db, string actionName, string scriptContent)
     {
         var vbsStr = BuildScriptActionVbs(actionName, scriptContent, deferred: true);
         db.Execute($"INSERT INTO `CustomAction` (`Action`, `Type`, `Source`, `Target`, `ExtendedType`) VALUES ('{EscSql(actionName)}', 3110, '', '{EscSql(vbsStr)}', 0)");
@@ -1631,7 +1631,7 @@ public class MsiBuilder
             }
 
             // Step 2: open the MSI once and embed every cabinet as a stream.
-            using var db = new Database(msiPath, DatabaseOpenMode.Direct);
+            using var db = MsiDatabase.Open(msiPath, MsiOpenMode.Direct);
             using var view = db.OpenView("SELECT `Name`, `Data` FROM `_Streams`");
             view.Execute();
 
@@ -1644,10 +1644,10 @@ public class MsiBuilder
                 totalCabBytes += cabBytes;
                 totalFiles += seg.Files.Count;
 
-                using var record = new Record(2);
+                using var record = MsiRecord.Create(2);
                 record.SetString(1, seg.CabinetName);
                 record.SetStream(2, cabPath);
-                view.Modify(ViewModifyMode.Assign, record);
+                view.Assign(record);
 
                 _logger.LogDebug(
                     "Embedded cabinet '{CabName}': {Files} files, {Bytes:N0} bytes",
@@ -1771,7 +1771,7 @@ public class MsiBuilder
     /// the deepest segment.
     /// </summary>
     private static string EnsureDirectoryChain(
-        Database db,
+        MsiDatabase db,
         Dictionary<string, string> cache,
         string? relativeDir)
     {

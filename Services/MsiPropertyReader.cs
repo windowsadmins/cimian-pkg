@@ -1,7 +1,8 @@
 using System.Text;
 using Cimian.CLI.Cimipkg.Models;
 using Microsoft.Extensions.Logging;
-using WixToolset.Dtf.WindowsInstaller;
+using System.ComponentModel;
+using Cimian.CLI.Cimipkg.Services.Msi;
 
 namespace Cimian.CLI.Cimipkg.Services;
 
@@ -33,7 +34,7 @@ public class MsiPropertyReader
 
         try
         {
-            using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+            using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
 
             metadata.ProductName = ReadProperty(db, "ProductName") ?? string.Empty;
             metadata.ProductVersion = ReadProperty(db, "ProductVersion") ?? string.Empty;
@@ -55,7 +56,7 @@ public class MsiPropertyReader
             // Try to determine architecture from Summary Information
             try
             {
-                var template = db.SummaryInfo.Template;
+                var template = db.GetSummaryTemplate();
                 if (!string.IsNullOrEmpty(template))
                 {
                     metadata.Architecture = template.Contains("x64", StringComparison.OrdinalIgnoreCase) ? "x64"
@@ -69,7 +70,7 @@ public class MsiPropertyReader
                 _logger.LogDebug("Could not read Summary Information template: {Error}", ex.Message);
             }
         }
-        catch (InstallerException ex)
+        catch (Win32Exception ex)
         {
             _logger.LogError("Failed to read MSI database {Path}: {Error}", msiPath, ex.Message);
             throw;
@@ -110,7 +111,7 @@ public class MsiPropertyReader
     /// </summary>
     public string? ReadProperty(string msiPath, string propertyName)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
         return ReadProperty(db, propertyName);
     }
 
@@ -121,15 +122,15 @@ public class MsiPropertyReader
     {
         var properties = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
 
-        if (!db.Tables.Contains("Property"))
+        if (!db.TableExists("Property"))
             return properties;
 
         using var view = db.OpenView("SELECT `Property`, `Value` FROM `Property`");
         view.Execute();
 
-        foreach (var record in view)
+        for (var record = view.Fetch(); record != null; record = view.Fetch())
         {
             using (record)
             {
@@ -148,8 +149,8 @@ public class MsiPropertyReader
     /// </summary>
     public IReadOnlyList<string> ListTables(string msiPath)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
-        return db.Tables.Cast<TableInfo>().Select(t => t.Name).Order().ToList();
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
+        return db.GetTableNames().Order().ToList();
     }
 
     /// <summary>
@@ -159,13 +160,12 @@ public class MsiPropertyReader
     public (IReadOnlyList<string> Columns, IReadOnlyList<IReadOnlyList<string>> Rows) ReadTable(
         string msiPath, string tableName)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
 
-        if (!db.Tables.Contains(tableName))
+        if (!db.TableExists(tableName))
             throw new ArgumentException($"Table '{tableName}' not found in MSI database");
 
-        var tableInfo = db.Tables[tableName];
-        var columns = tableInfo.Columns.Cast<ColumnInfo>().Select(c => c.Name).ToList();
+        var columns = db.GetColumnNames(tableName);
 
         var rows = new List<IReadOnlyList<string>>();
         var columnList = string.Join(", ", columns.Select(c => $"`{c}`"));
@@ -173,7 +173,7 @@ public class MsiPropertyReader
         using var view = db.OpenView($"SELECT {columnList} FROM `{tableName}`");
         view.Execute();
 
-        foreach (var record in view)
+        for (var record = view.Fetch(); record != null; record = view.Fetch())
         {
             using (record)
             {
@@ -196,16 +196,16 @@ public class MsiPropertyReader
     {
         var files = new List<MsiFileEntry>();
 
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
 
-        if (!db.Tables.Contains("File"))
+        if (!db.TableExists("File"))
             return files;
 
         using var view = db.OpenView(
             "SELECT `File`, `FileName`, `FileSize`, `Version`, `Component_` FROM `File`");
         view.Execute();
 
-        foreach (var record in view)
+        for (var record = view.Fetch(); record != null; record = view.Fetch())
         {
             using (record)
             {
@@ -227,16 +227,16 @@ public class MsiPropertyReader
         return files;
     }
 
-    private static string? ReadProperty(Database db, string propertyName)
+    private static string? ReadProperty(MsiDatabase db, string propertyName)
     {
-        if (!db.Tables.Contains("Property"))
+        if (!db.TableExists("Property"))
             return null;
 
         try
         {
             return db.ExecuteScalar(
-                "SELECT `Value` FROM `Property` WHERE `Property` = '{0}'",
-                propertyName)?.ToString();
+                "SELECT `Value` FROM `Property` WHERE `Property` = ?",
+                propertyName);
         }
         catch
         {
