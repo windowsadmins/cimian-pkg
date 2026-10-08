@@ -56,6 +56,17 @@ public class BuildInfoTests
         return dict;
     }
 
+    [Fact]
+    public void DoSubstitutions_Architecture_ResolvesFromEnv()
+    {
+        var bi = MakeBuildInfo();
+        bi.Product.Architecture = "${ARCH}";
+
+        bi.DoSubstitutions(Env(("ARCH", "arm64")));
+
+        Assert.Equal("arm64", bi.Product.Architecture);
+    }
+
     #region Built-in Token Tests
 
     [Fact]

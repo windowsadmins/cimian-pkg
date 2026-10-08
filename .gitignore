@@ -23,3 +23,6 @@ packages/
 ## Publish
 publish/
 .claude/worktrees/
+
+# Git worktrees
+/.worktrees/

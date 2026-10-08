@@ -44,6 +44,7 @@ public class BuildInfo
         Product.Name        = Expand(Product.Name,        envVars, v) ?? Product.Name;
         Product.Identifier  = Expand(Product.Identifier,  envVars, v) ?? Product.Identifier;
         Product.Description = Expand(Product.Description, envVars, v);
+        Product.Architecture = Expand(Product.Architecture, envVars, v);
 
         SigningCertificate  = Expand(SigningCertificate,  envVars, v);
         SigningThumbprint   = Expand(SigningThumbprint,   envVars, v);
@@ -266,6 +267,13 @@ public class ProductInfo
     /// </summary>
     [YamlMember(Alias = "description")]
     public string? Description { get; set; }
+
+    /// <summary>
+    /// Target architecture: x64 (the default) or arm64. Sets the platform in
+    /// the MSI's Summary Information Template.
+    /// </summary>
+    [YamlMember(Alias = "architecture")]
+    public string? Architecture { get; set; }
 
     /// <summary>
     /// Installer type (msi, exe, etc.) - indicates this is an installer package.
