@@ -539,6 +539,78 @@ public class MsiBuilderTests
             () => MsiBuilder.PlanCabinetSegments(tmp.Path, Array.Empty<string>(), "id", maxBytesPerCabinet: -1));
     }
 
+    // Regression context: a network-drive package failed to build with
+    // "Failed to set property 'ARPCOMMENTS' (value length=202): SQL query syntax
+    // invalid or unsupported" because the description was spliced into the SQL
+    // text. A long, multi-line description must write cleanly.
+    private const string LongMultilineDescription =
+        "Maps the network drives at sign-in.\r\n" +
+        "Reads the user's group membership and mounts the matching shares,\n" +
+        "including 'Studio' and \"Faculty\" drives;\tretries when the VPN is slow.\n\n" +
+        "Logs to C:\\ProgramData\\ManagedInstalls\\Logs and never prompts for credentials. " +
+        "Extra text keeps this well past the cap so truncation is exercised as well.";
+
+    [Fact]
+    public void SanitizeArpText_LongMultilineDescription_IsSingleLineAndCapped()
+    {
+        var result = MsiBuilder.SanitizeArpText(LongMultilineDescription);
+
+        Assert.True(result.Length <= MsiBuilder.ArpTextMaxLength, $"length {result.Length}");
+        Assert.DoesNotContain(result, char.IsControl);
+        Assert.DoesNotContain("  ", result);
+        Assert.StartsWith("Maps the network drives at sign-in. Reads the user's", result);
+        Assert.EndsWith("...", result);
+    }
+
+    [Fact]
+    public void SanitizeArpText_ShortSingleLine_IsUnchanged()
+    {
+        const string text = "Maps network drives, including 'Studio'.";
+        Assert.Equal(text, MsiBuilder.SanitizeArpText(text));
+    }
+
+    [Fact]
+    public void SanitizeArpText_TrimsAndCollapsesWhitespace()
+    {
+        Assert.Equal("a b c", MsiBuilder.SanitizeArpText("  a\r\n\r\nb\t\u0007 c \n"));
+        Assert.Equal(string.Empty, MsiBuilder.SanitizeArpText("\r\n\t "));
+    }
+
+    [Fact]
+    public void SanitizeArpText_DoesNotSplitSurrogatePair()
+    {
+        var text = new string('x', 251) + "\U0001F600" + new string('y', 20);
+        var result = MsiBuilder.SanitizeArpText(text);
+        Assert.True(result.Length <= MsiBuilder.ArpTextMaxLength);
+        Assert.False(char.IsHighSurrogate(result[^4]));
+    }
+
+    [Fact]
+    public void InsertProperty_LongMultilineValue_RoundTrips()
+    {
+        var msi = Path.Combine(Path.GetTempPath(), $"cimipkg-property-{Guid.NewGuid():N}.msi");
+        try
+        {
+            using (var db = new Database(msi, DatabaseOpenMode.Create))
+            {
+                MsiBuilder.CreateTables(db);
+                MsiBuilder.InsertProperty(db, "ARPCOMMENTS", MsiBuilder.SanitizeArpText(LongMultilineDescription));
+                MsiBuilder.InsertProperty(db, "CIMIAN_TEST_RAW", LongMultilineDescription);
+                db.Commit();
+            }
+
+            using var readDb = new Database(msi, DatabaseOpenMode.ReadOnly);
+            Assert.Equal(MsiBuilder.SanitizeArpText(LongMultilineDescription),
+                readDb.ExecutePropertyQuery("ARPCOMMENTS"));
+            Assert.Equal(LongMultilineDescription.Replace("\r\n", "\n"),
+                readDb.ExecutePropertyQuery("CIMIAN_TEST_RAW")?.Replace("\r\n", "\n"));
+        }
+        finally
+        {
+            try { File.Delete(msi); } catch { /* best effort */ }
+        }
+    }
+
     /// <summary>
     /// Disposable scratch directory for planner tests that need real files on
     /// disk (the planner calls FileInfo.Length which requires an actual file).
