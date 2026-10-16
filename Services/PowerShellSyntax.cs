@@ -18,9 +18,10 @@ public static class PowerShellSyntax
 {
     /// <summary>
     /// Parses <paramref name="content"/> with the real PowerShell parser
-    /// (via powershell.exe, which is present on every Windows build host).
-    /// Returns true when the script parses; otherwise false with the parser's
-    /// own error messages (line-numbered) in <paramref name="errors"/>.
+    /// (via powershell.exe, which is present on every Windows build host),
+    /// then checks the parsed AST for an assignment that lost its <c>$</c>.
+    /// Returns true when the script passes both; otherwise false with the
+    /// line-numbered findings in <paramref name="errors"/>.
     /// Returns true with a note in <paramref name="errors"/> when no
     /// PowerShell engine is available, so validation never blocks a build on
     /// a host that cannot run it.
@@ -45,11 +46,14 @@ public static class PowerShellSyntax
         {
             File.WriteAllText(tmp, content, new UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
 
-            // ParseFile reports syntax errors without executing anything.
+            // ParseFile reports syntax errors without executing anything. A
+            // script that parses is then walked for statements that are legal
+            // grammar but cannot be what the author meant (see BareAssignmentCheck).
             var command =
                 "$e = $null; " +
-                $"[void][System.Management.Automation.Language.Parser]::ParseFile('{tmp.Replace("'", "''")}', [ref]$null, [ref]$e); " +
+                $"$ast = [System.Management.Automation.Language.Parser]::ParseFile('{tmp.Replace("'", "''")}', [ref]$null, [ref]$e); " +
                 "if ($e) { $e | ForEach-Object { Write-Output (\"line \" + $_.Extent.StartLineNumber + \": \" + $_.Message) }; exit 1 } " +
+                BareAssignmentCheck +
                 "exit 0";
 
             var psi = new ProcessStartInfo
@@ -96,6 +100,46 @@ public static class PowerShellSyntax
             try { File.Delete(tmp); } catch { }
         }
     }
+
+    /// <summary>
+    /// PowerShell parses <c>word = value</c> as a call to a command named
+    /// <c>word</c> with the arguments <c>=</c> and <c>value</c>, so an
+    /// assignment that lost its <c>$</c> (a placeholder substitution that
+    /// consumed <c>$x64</c> and left <c>x64 = ...</c>) passes the parser and
+    /// only fails on the device, at install time. This walks the AST for a
+    /// pipeline that opens with a bare-word command followed by a bare word
+    /// starting with <c>=</c> (or <c>+=</c>, <c>-=</c>, ...), or whose bare
+    /// command name itself contains the <c>=</c> (<c>x64='v'</c> and
+    /// <c>x64=$v</c> tokenize as one word), and fails when the name before
+    /// the <c>=</c> is neither a function defined in the script nor a
+    /// command the build host resolves.
+    /// Expects <c>$ast</c> to hold the parsed script; writes
+    /// <c>line N: ...</c> lines and exits 1 on a finding.
+    /// </summary>
+    private const string BareAssignmentCheck =
+        "$L = [System.Management.Automation.Language.StringConstantType]::BareWord; " +
+        "$defined = @{}; " +
+        "foreach ($f in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.FunctionDefinitionAst] }, $true)) { $defined[$f.Name] = $true } " +
+        "$bad = @(); " +
+        "foreach ($c in $ast.FindAll({ param($n) $n -is [System.Management.Automation.Language.CommandAst] }, $true)) { " +
+        "  $p = $c.Parent; " +
+        "  if (-not ($p -is [System.Management.Automation.Language.PipelineAst]) -or $p.PipelineElements[0] -ne $c) { continue } " +
+        "  $el = $c.CommandElements; " +
+        "  $n0 = $el[0]; " +
+        "  if (-not ($n0 -is [System.Management.Automation.Language.StringConstantExpressionAst]) -or $n0.StringConstantType -ne $L) { continue } " +
+        "  $name = $n0.Value; " +
+        "  $bare = $null; " +
+        "  if ($name -match '^([^=]+?)[-+*/%]?=') { $bare = $Matches[1] } " +
+        "  elseif ($el.Count -ge 2) { " +
+        "    $n1 = $el[1]; " +
+        "    if (($n1 -is [System.Management.Automation.Language.StringConstantExpressionAst] -or $n1 -is [System.Management.Automation.Language.ExpandableStringExpressionAst]) -and $n1.StringConstantType -eq $L -and $n1.Extent.Text -match '^[-+*/%]?=') { $bare = $name } " +
+        "  } " +
+        "  if (-not $bare) { continue } " +
+        "  if ($defined.ContainsKey($bare)) { continue } " +
+        "  if ($bare -notmatch '[*?\\[\\]]' -and (Get-Command -Name $bare -ErrorAction SilentlyContinue)) { continue } " +
+        "  $bad += (\"line \" + $c.Extent.StartLineNumber + \": '\" + $bare + \" =' calls a command named '\" + $bare + \"', which is not a known command; an assignment needs '$\" + $bare + \"' (check for a placeholder substitution that consumed the '$')\") " +
+        "} " +
+        "if ($bad.Count -gt 0) { $bad | ForEach-Object { Write-Output $_ }; exit 1 } ";
 
     private static string? FindPowerShell()
     {
