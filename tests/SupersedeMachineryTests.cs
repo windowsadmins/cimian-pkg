@@ -1,5 +1,5 @@
 using Cimian.CLI.Cimipkg.Services;
-using WixToolset.Dtf.WindowsInstaller;
+using Cimian.CLI.Cimipkg.Services.Msi;
 using Xunit;
 
 namespace Cimian.Tests.Cimipkg;
@@ -27,7 +27,7 @@ public class SupersedeMachineryTests
     {
         var path = Path.Combine(Path.GetTempPath(),
             $"cimipkg-supersede-{Guid.NewGuid():N}.msi");
-        using (var db = new Database(path, DatabaseOpenMode.Create))
+        using (var db = MsiDatabase.Open(path, MsiOpenMode.Create))
         {
             MsiBuilder.CreateTables(db);
             db.Commit();
@@ -39,7 +39,7 @@ public class SupersedeMachineryTests
     {
         var path = Path.Combine(Path.GetTempPath(),
             $"cimipkg-supersede-{Guid.NewGuid():N}.msi");
-        using (var db = new Database(path, DatabaseOpenMode.Create))
+        using (var db = MsiDatabase.Open(path, MsiOpenMode.Create))
         {
             MsiBuilder.CreateTables(db);
             MsiBuilder.WriteInstallSequence(db, hasScripts, hasPayload);
@@ -50,7 +50,7 @@ public class SupersedeMachineryTests
 
     private static List<string> ListTables(string msiPath)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
         using var view = db.OpenView("SELECT `Name` FROM `_Tables`");
         view.Execute();
         var names = new List<string>();
@@ -63,7 +63,7 @@ public class SupersedeMachineryTests
 
     private static List<string> ListInstallExecuteSequenceActions(string msiPath)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
         using var view = db.OpenView("SELECT `Action` FROM `InstallExecuteSequence`");
         view.Execute();
         var actions = new List<string>();
@@ -76,7 +76,7 @@ public class SupersedeMachineryTests
 
     private static int SequenceOf(string msiPath, string action)
     {
-        using var db = new Database(msiPath, DatabaseOpenMode.ReadOnly);
+        using var db = MsiDatabase.Open(msiPath, MsiOpenMode.ReadOnly);
         using var view = db.OpenView(
             $"SELECT `Sequence` FROM `InstallExecuteSequence` WHERE `Action`='{action}'");
         view.Execute();
@@ -171,7 +171,7 @@ public class SupersedeMachineryTests
         var msi = BuildSchemaAndSequenceMsi(hasScripts: true, hasPayload: true);
         try
         {
-            using var db = new Database(msi, DatabaseOpenMode.ReadOnly);
+            using var db = MsiDatabase.Open(msi, MsiOpenMode.ReadOnly);
             using var view = db.OpenView(
                 "SELECT `Action` FROM `CustomAction` WHERE `Source`='REINSTALL'");
             view.Execute();
@@ -192,14 +192,14 @@ public class SupersedeMachineryTests
         var upgradeCode = UpgradeCodeGenerator.GenerateUpgradeCode("ca.test.Sample");
         try
         {
-            using (var db = new Database(path, DatabaseOpenMode.Create))
+            using (var db = MsiDatabase.Open(path, MsiOpenMode.Create))
             {
                 MsiBuilder.CreateTables(db);
                 MsiBuilder.WriteUpgradeTable(db, upgradeCode);
                 db.Commit();
             }
 
-            using var rdb = new Database(path, DatabaseOpenMode.ReadOnly);
+            using var rdb = MsiDatabase.Open(path, MsiOpenMode.ReadOnly);
             using var view = rdb.OpenView(
                 "SELECT `UpgradeCode`, `VersionMin`, `VersionMax`, `Attributes`, `ActionProperty` FROM `Upgrade`");
             view.Execute();
@@ -234,7 +234,7 @@ public class SupersedeMachineryTests
         var legacyB = Guid.Parse("cba9612a-c60f-5048-b6e0-44b0a09586ad");
         try
         {
-            using (var db = new Database(path, DatabaseOpenMode.Create))
+            using (var db = MsiDatabase.Open(path, MsiOpenMode.Create))
             {
                 MsiBuilder.CreateTables(db);
                 // Duplicates and the primary code itself must be ignored, or the
@@ -245,7 +245,7 @@ public class SupersedeMachineryTests
             }
 
             var rows = new List<(string Code, int Attributes, string ActionProperty)>();
-            using (var rdb = new Database(path, DatabaseOpenMode.ReadOnly))
+            using (var rdb = MsiDatabase.Open(path, MsiOpenMode.ReadOnly))
             using (var view = rdb.OpenView(
                 "SELECT `UpgradeCode`, `Attributes`, `ActionProperty` FROM `Upgrade`"))
             {
@@ -287,7 +287,7 @@ public class SupersedeMachineryTests
         var upgradeCode = UpgradeCodeGenerator.GenerateUpgradeCode("ca.test.Sample");
         try
         {
-            using (var db = new Database(path, DatabaseOpenMode.Create))
+            using (var db = MsiDatabase.Open(path, MsiOpenMode.Create))
             {
                 MsiBuilder.CreateTables(db);
                 MsiBuilder.WriteUpgradeTable(db, upgradeCode, null);
@@ -295,7 +295,7 @@ public class SupersedeMachineryTests
             }
 
             var count = 0;
-            using (var rdb = new Database(path, DatabaseOpenMode.ReadOnly))
+            using (var rdb = MsiDatabase.Open(path, MsiOpenMode.ReadOnly))
             using (var view = rdb.OpenView("SELECT `UpgradeCode` FROM `Upgrade`"))
             {
                 view.Execute();

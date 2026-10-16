@@ -113,7 +113,7 @@ cimipkg <project-directory>
 cimipkg --sign-cert "My Certificate" <project-directory>
 ```
 
-The default output format. Builds native Windows Installer packages via the DTF (WixToolset.Dtf.WindowsInstaller) API — no WiX compiler or `msiexec` needed at build time.
+The default output format. Builds native Windows Installer packages through msi.dll — no WiX or `msiexec` needed at build time.
 
 ### What cimipkg does
 

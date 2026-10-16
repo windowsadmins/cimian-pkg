@@ -3,7 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Cimian.CLI.Cimipkg.Services;
-using WixToolset.Dtf.WindowsInstaller;
+using Cimian.CLI.Cimipkg.Services.Msi;
 using Xunit;
 
 namespace Cimian.Tests.Cimipkg;
@@ -33,7 +33,7 @@ public class MsiBuilderTests
         var msi = Path.Combine(Path.GetTempPath(), $"cimipkg-directory-{Guid.NewGuid():N}.msi");
         try
         {
-            using (var db = new Database(msi, DatabaseOpenMode.Create))
+            using (var db = MsiDatabase.Open(msi, MsiOpenMode.Create))
             {
                 MsiBuilder.CreateTables(db);
                 MsiBuilder.WriteDirectoryTable(
@@ -44,7 +44,7 @@ public class MsiBuilderTests
                 db.Commit();
             }
 
-            using var readDb = new Database(msi, DatabaseOpenMode.ReadOnly);
+            using var readDb = MsiDatabase.Open(msi, MsiOpenMode.ReadOnly);
             using var view = readDb.OpenView(
                 "SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`");
             view.Execute();
