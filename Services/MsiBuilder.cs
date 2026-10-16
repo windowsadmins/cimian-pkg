@@ -707,7 +707,8 @@ public class MsiBuilder
         {
             var isLast = i == segments.Length - 1;
             var dirId = isLast ? "INSTALLDIR" : $"D_{SanitizeIdentifier(string.Join("_", segments[..(i + 1)]))}";
-            db.Execute($"INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES ('{EscSql(dirId)}', '{EscSql(currentParent)}', '{EscSql(segments[i])}')");
+            db.Execute("INSERT INTO `Directory` (`Directory`, `Directory_Parent`, `DefaultDir`) VALUES (?, ?, ?)",
+                dirId, currentParent, segments[i]);
             currentParent = dirId;
         }
     }
@@ -1088,7 +1089,7 @@ public class MsiBuilder
         }
         else
         {
-            var cleanInstallDir = installDir.TrimEnd('\\', '/');
+            var cleanInstallDir = installDir.TrimEnd('\\', '/').Replace("'", "''");
             variableHeader = $"$payloadRoot = '{cleanInstallDir}'\r\n" +
                              $"$payloadDir = '{cleanInstallDir}'\r\n" +
                              $"$installLocation = '{cleanInstallDir}'\r\n\r\n";
@@ -1321,8 +1322,8 @@ public class MsiBuilder
     /// [INSTALLDIR], [OriginalDatabase] and [CIMIAN_PSEXE]; every other square bracket
     /// is escaped as [\[] / [\]]. The bootstrap uses no double quotes (it sits inside
     /// one quoted -Command argument) and no braces. Product name and version are
-    /// fixed at build time and quoted for PowerShell; INSTALLDIR is a runtime path in
-    /// a single-quoted string, so a path containing an apostrophe is not supported.
+    /// fixed at build time and quoted for PowerShell. Runtime paths use literal
+    /// here-strings so apostrophes, dollar signs and backticks remain path data.
     /// </summary>
     public static string BuildScriptActionCommandLine(string actionName, string phase, string productName, string msiVersion)
     {
@@ -1350,11 +1351,12 @@ public class MsiBuilder
         var steps = new[]
         {
             "$ErrorActionPreference='Stop'",
-            $"$env:CIMIAN_INSTALLDIR='{InstallDir}'",
+            $"$env:CIMIAN_INSTALLDIR=@'\n{InstallDir}\n'@",
             $"$env:CIMIAN_PHASE={Quote(phase)}",
             $"$env:CIMIAN_VERSION={Quote(msiVersion)}",
             "$i=New-Object -ComObject WindowsInstaller.Installer",
-            $"$d=$i.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$i,@('{Database}',0))",
+            $"$source=@'\n{Database}\n'@",
+            "$d=$i.GetType().InvokeMember('OpenDatabase','InvokeMethod',$null,$i,@($source,0))",
             $"$v=$d.GetType().InvokeMember('OpenView','InvokeMethod',$null,$d,@({Quote(sql)}))",
             "$null=$v.GetType().InvokeMember('Execute','InvokeMethod',$null,$v,$null)",
             "$r=$v.GetType().InvokeMember('Fetch','InvokeMethod',$null,$v,$null)",
@@ -1364,7 +1366,8 @@ public class MsiBuilder
             "[IO.File]::WriteAllBytes($t,[Convert]::FromBase64String($b))",
             "$l=$t+'.log'",
             "$q=[char]34",
-            $"$p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/c '+$q+$q+'{PsExe}'+$q+' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '+$q+$t+$q+' > '+$q+$l+$q+' 2>&1'+$q) -WindowStyle Hidden -Wait -PassThru",
+            $"$psExe=@'\n{PsExe}\n'@",
+            "$p=Start-Process -FilePath $env:ComSpec -ArgumentList ('/c '+$q+$q+$psExe+$q+' -NoProfile -NonInteractive -ExecutionPolicy Bypass -File '+$q+$t+$q+' > '+$q+$l+$q+' 2>&1'+$q) -WindowStyle Hidden -Wait -PassThru",
             "$rc=$p.ExitCode",
             "$ErrorActionPreference='Continue'",
             $"$g=Join-Path $env:ProgramData {Quote(@"ManagedInstalls\logs\packages\" + logDir)}",

@@ -11,18 +11,16 @@ namespace Cimian.Tests.Cimipkg;
 /// <summary>
 /// Tests for MsiBuilder: table authoring, the script custom actions and the cabinet planner.
 ///
-/// Regression context: RenderingManager v2026.04.10.1431 shipped with a broken
-/// postinstall custom action because the previous implementation inlined the
-/// whole PowerShell script as a single base64 string in a single VBS source
-/// line. For ~15 KB of PS1 that line exceeded 40,000 chars, tripping the VBS
-/// parser's ~1022 char per-source-line hard limit, and the custom action
-/// silently no-op'd on 142 endpoints. These tests enforce that the generated
-/// VBS stays parsable even for large scripts.
+/// Scripts are carried in the Binary table rather than inlined into the command
+/// line. These tests cover the bootstrap's PowerShell and MSI formatting, literal
+/// runtime paths and the database rows needed to install the payload.
 /// </summary>
 public class MsiBuilderTests
 {
-    [Fact]
-    public void WriteDirectoryTable_KnownFolderRoot_EmitsValidInstallDir()
+    [Theory]
+    [InlineData("")]
+    [InlineData("Bob's $Widget`test [v2]")]
+    public void WriteDirectoryTable_PreservesInstallLocation(string subdirectory)
     {
         var msi = Path.Combine(Path.GetTempPath(), $"cimipkg-directory-{Guid.NewGuid():N}.msi");
         try
@@ -32,7 +30,7 @@ public class MsiBuilderTests
                 MsiBuilder.CreateTables(db);
                 MsiBuilder.WriteDirectoryTable(
                     db,
-                    Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData),
+                    Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.CommonApplicationData), subdirectory),
                     isInstallerType: false,
                     productName: "KnownFolderRootTest");
                 db.Commit();
@@ -52,7 +50,7 @@ public class MsiBuilderTests
                 }
             }
 
-            Assert.Equal(("CommonAppDataFolder", "."), rows["INSTALLDIR"]);
+            Assert.Equal(("CommonAppDataFolder", subdirectory.Length == 0 ? "." : subdirectory), rows["INSTALLDIR"]);
             foreach (var row in rows)
             {
                 if (!string.IsNullOrEmpty(row.Value.Parent))
@@ -136,14 +134,30 @@ public class MsiBuilderTests
         Assert.True(PowerShellSyntax.TryValidate(bootstrap, out var errors), errors);
     }
 
+    [Theory]
+    [InlineData(@"C:\Program Files\Bob's Widget\")]
+    [InlineData(@"C:\Packages\$Widget`test [v2]\")]
+    public void CommandLine_RuntimePathsRemainLiteralPowerShell(string path)
+    {
+        var command = CommandLine()
+            .Replace("[INSTALLDIR]", path)
+            .Replace("[OriginalDatabase]", path + "setup.msi")
+            .Replace("[CIMIAN_PSEXE]", path + "powershell.exe");
+        var bootstrap = Formatted(Bootstrap(command));
+
+        Assert.True(PowerShellSyntax.TryValidate(bootstrap, out var errors), errors);
+        Assert.Contains("@'\n" + path + "\n'@", bootstrap);
+        Assert.Contains("@'\n" + path + "setup.msi\n'@", bootstrap);
+    }
+
     [Fact]
     public void CommandLine_ReadsItsOwnBinaryRowAndLaunchesTheResolvedRuntime()
     {
         var bootstrap = Formatted(Bootstrap(CommandLine("CimianPreinstall")));
 
         Assert.Contains("WHERE `Name`=''CimianPreinstall''", bootstrap);
-        Assert.Contains(@"'C:\Windows\Installer\1a2b3c.msi'", bootstrap);
-        Assert.Contains(@"'C:\Program Files\PowerShell\7\pwsh.exe'", bootstrap);
+        Assert.Contains("@'\nC:\\Windows\\Installer\\1a2b3c.msi\n'@", bootstrap);
+        Assert.Contains("@'\nC:\\Program Files\\PowerShell\\7\\pwsh.exe\n'@", bootstrap);
         Assert.Contains("-NoProfile -NonInteractive -ExecutionPolicy Bypass -File", bootstrap);
         Assert.Contains("exit $rc", bootstrap);
     }
@@ -153,7 +167,7 @@ public class MsiBuilderTests
     {
         var bootstrap = Formatted(Bootstrap(CommandLine("CimianUninstall", "uninstall", version: "1.2.3")));
 
-        Assert.Contains(@"$env:CIMIAN_INSTALLDIR='C:\Program Files\Contoso\'", bootstrap);
+        Assert.Contains("$env:CIMIAN_INSTALLDIR=@'\nC:\\Program Files\\Contoso\\\n'@", bootstrap);
         Assert.Contains("$env:CIMIAN_PHASE='uninstall'", bootstrap);
         Assert.Contains("$env:CIMIAN_VERSION='1.2.3'", bootstrap);
     }
