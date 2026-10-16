@@ -28,4 +28,6 @@ To test migration, supply a released builder that generates the old VBScript for
 
 The guest proves that the old package fails with error 2738, registers the copied engine only inside the Sandbox and installs the old package. It then stops Windows Installer, removes the copied DLLs and registrations, and verifies that the engine and old standalone uninstall fail again. Finally it upgrades to the new package and uninstalls it without VBScript. This tests an isolated engine fixture rather than removal of the Windows Feature on Demand itself.
 
+Add `-LegacyOnly` to run just the migration phase in a new Sandbox. This requires `-LegacyBuilderPath` and preserves separate results from the new-format lifecycle checks.
+
 This harness does not establish arm64 execution, Intune delivery or a standard user's interactive elevation flow.

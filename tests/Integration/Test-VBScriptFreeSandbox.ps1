@@ -1,4 +1,4 @@
-param([switch]$ShutdownWhenDone)
+param([switch]$ShutdownWhenDone, [switch]$LegacyOnly)
 $ErrorActionPreference = 'Stop'
 if ($env:USERNAME -ne 'WDAGUtilityAccount') { throw 'Run only inside Windows Sandbox.' }
 $output = 'C:\ValidationOutput'
@@ -40,26 +40,29 @@ try {
     Copy-Item 'C:\ValidationInput\*.msi' $sourceDir
     Set-Content 'C:\CimipkgValidation\engine.vbs' 'WScript.Echo "VBScript available"'
     Check 'Fresh image has no VBScript DLL or usable engine' ((-not (Test-Path "$env:WINDIR\System32\vbscript.dll")) -and (VbsExit) -ne 0)
-    Check 'Fresh install with literal source and destination paths' ((Install 'probe-1.msi' '01-install') -eq 0)
-    Check 'Payload installed' ((Get-Content -LiteralPath "$installDir\marker.txt" -Raw).Trim() -eq '1.0.0')
-    Check 'Exactly one registered product' ((ProductCount) -eq 1)
-    $initial = @(Events)
-    Check 'Preinstall and postinstall ran with exact environment' ($initial.Count -eq 2 -and @($initial | Where-Object { $_.installDir.TrimEnd('\') -ne $installDir -or $_.payloadRoot.TrimEnd('\') -ne $installDir -or $_.phase -ne 'install' -or $_.version -ne '1.0.0' -or $_.psVersion -notlike '5.1*' }).Count -eq 0)
-    Check 'Deferred postinstall runs as LocalSystem' (@($initial | Where-Object { $_.action -eq 'postinstall' -and $_.sid -eq 'S-1-5-18' }).Count -eq 1)
-    Check 'Sidecar output captured' ((Test-Path 'C:\ProgramData\ManagedInstalls\logs\packages\Cimipkg Runtime Probe\postinstall.log') -and (Get-Content 'C:\ProgramData\ManagedInstalls\logs\packages\Cimipkg Runtime Probe\postinstall.log' -Raw) -match 'probe postinstall')
-    Check 'Same-version reinstall' ((Install 'probe-1.msi' '02-reinstall') -eq 0)
-    Check 'Repair' ((Install 'probe-1.msi' '03-repair' '/fa') -eq 0)
-    Check 'Upgrade' ((Install 'probe-2.msi' '04-upgrade') -eq 0)
-    Check 'Upgrade replaces payload and preserves one registration' (((Get-Content -LiteralPath "$installDir\marker.txt" -Raw).Trim() -eq '1.1.0') -and (ProductCount) -eq 1)
-    Check 'Old uninstall does not run during upgrade' (@(Events | Where-Object action -eq 'uninstall').Count -eq 0)
-    $productCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object DisplayName -eq 'Cimipkg Runtime Probe').PSChildName
-    Move-Item -LiteralPath "$sourceDir\probe-2.msi" -Destination "$sourceDir\probe-2.removed"
-    Check 'Uninstall uses cached MSI after source removal' ((Install $productCode '05-uninstall' '/x') -eq 0)
-    Check 'Uninstall removes payload and registration' ((-not (Test-Path -LiteralPath "$installDir\marker.txt")) -and (ProductCount) -eq 0)
-    Check 'Uninstall script ran' (@(Events | Where-Object { $_.action -eq 'uninstall' -and $_.phase -eq 'uninstall' }).Count -eq 1)
-    Check 'Failing postinstall returns 1603' ((Install 'probe-fail.msi' '06-failure') -eq 1603)
-    Check 'Failed installation rolls back' ((-not (Test-Path -LiteralPath "$installDir\marker.txt")) -and (ProductCount) -eq 0)
-    Check 'Temporary scripts cleaned up' (@(Get-ChildItem "$env:TEMP\cimian-*.ps1" -ErrorAction SilentlyContinue).Count -eq 0)
+    if ($LegacyOnly -and -not (Test-Path 'C:\ValidationInput\probe-legacy.msi')) { throw 'LegacyOnly requires a legacy MSI.' }
+    if (-not $LegacyOnly) {
+        Check 'Fresh install with literal source and destination paths' ((Install 'probe-1.msi' '01-install') -eq 0)
+        Check 'Payload installed' ((Get-Content -LiteralPath "$installDir\marker.txt" -Raw).Trim() -eq '1.0.0')
+        Check 'Exactly one registered product' ((ProductCount) -eq 1)
+        $initial = @(Events)
+        Check 'Preinstall and postinstall ran with exact environment' ($initial.Count -eq 2 -and @($initial | Where-Object { $_.installDir.TrimEnd('\') -ne $installDir -or $_.payloadRoot.TrimEnd('\') -ne $installDir -or $_.phase -ne 'install' -or $_.version -ne '1.0.0' -or $_.psVersion -notlike '5.1*' }).Count -eq 0)
+        Check 'Deferred postinstall runs as LocalSystem' (@($initial | Where-Object { $_.action -eq 'postinstall' -and $_.sid -eq 'S-1-5-18' }).Count -eq 1)
+        Check 'Sidecar output captured' ((Test-Path 'C:\ProgramData\ManagedInstalls\logs\packages\Cimipkg Runtime Probe\postinstall.log') -and (Get-Content 'C:\ProgramData\ManagedInstalls\logs\packages\Cimipkg Runtime Probe\postinstall.log' -Raw) -match 'probe postinstall')
+        Check 'Same-version reinstall' ((Install 'probe-1.msi' '02-reinstall') -eq 0)
+        Check 'Repair' ((Install 'probe-1.msi' '03-repair' '/fa') -eq 0)
+        Check 'Upgrade' ((Install 'probe-2.msi' '04-upgrade') -eq 0)
+        Check 'Upgrade replaces payload and preserves one registration' (((Get-Content -LiteralPath "$installDir\marker.txt" -Raw).Trim() -eq '1.1.0') -and (ProductCount) -eq 1)
+        Check 'Old uninstall does not run during upgrade' (@(Events | Where-Object action -eq 'uninstall').Count -eq 0)
+        $productCode = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*' | Where-Object DisplayName -eq 'Cimipkg Runtime Probe').PSChildName
+        Move-Item -LiteralPath "$sourceDir\probe-2.msi" -Destination "$sourceDir\probe-2.removed"
+        Check 'Uninstall uses cached MSI after source removal' ((Install $productCode '05-uninstall' '/x') -eq 0)
+        Check 'Uninstall removes payload and registration' ((-not (Test-Path -LiteralPath "$installDir\marker.txt")) -and (ProductCount) -eq 0)
+        Check 'Uninstall script ran' (@(Events | Where-Object { $_.action -eq 'uninstall' -and $_.phase -eq 'uninstall' }).Count -eq 1)
+        Check 'Failing postinstall returns 1603' ((Install 'probe-fail.msi' '06-failure') -eq 1603)
+        Check 'Failed installation rolls back' ((-not (Test-Path -LiteralPath "$installDir\marker.txt")) -and (ProductCount) -eq 0)
+        Check 'Temporary scripts cleaned up' (@(Get-ChildItem "$env:TEMP\cimian-*.ps1" -ErrorAction SilentlyContinue).Count -eq 0)
+    }
     if (Test-Path 'C:\ValidationInput\probe-legacy.msi') {
         Check 'Legacy package fails without VBScript' ((Install 'probe-legacy.msi' '07-legacy-absent') -eq 1603)
         Check 'Legacy failure identifies missing script engine' ((Get-Content "$output\07-legacy-absent.log" -Raw) -match '2738')
@@ -73,11 +76,16 @@ try {
         Check 'VBScript fixture is usable' ((VbsExit) -eq 0)
         Check 'Legacy package installs with VBScript' ((Install 'probe-legacy.msi' '08-legacy-present') -eq 0)
         Stop-Service msiserver -Force -ErrorAction SilentlyContinue
+        Get-Process msiexec -ErrorAction SilentlyContinue | Stop-Process -Force
         foreach ($prefix in 'SOFTWARE\Classes\CLSID', 'SOFTWARE\Classes\WOW6432Node\CLSID') {
             foreach ($clsid in 'B54F3741', 'B54F3742', 'B54F3743') {
                 & reg.exe delete "HKLM\$prefix\{$clsid-5B07-11cf-A4B0-00AA004A55E8}" /f | Out-Null
                 if ($LASTEXITCODE) { throw 'Could not remove the guest VBScript fixture registration.' }
             }
+        }
+        foreach ($name in 'VBScript', 'VBScript.Encode') {
+            & reg.exe delete "HKLM\SOFTWARE\Classes\$name" /f | Out-Null
+            if ($LASTEXITCODE) { throw 'Could not remove the guest VBScript ProgID fixture.' }
         }
         foreach ($arch in 'System32', 'SysWOW64') {
             Remove-Item "$env:WINDIR\$arch\vbscript.dll" -Force

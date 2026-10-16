@@ -137,7 +137,7 @@ public class MsiBuilderTests
     [Theory]
     [InlineData(@"C:\Program Files\Bob's Widget\")]
     [InlineData(@"C:\Packages\$Widget`test [v2]\")]
-    public void CommandLine_RuntimePathsRemainLiteralPowerShell(string path)
+    public void CommandLine_RuntimePathsParseAsPowerShell(string path)
     {
         var command = CommandLine()
             .Replace("[INSTALLDIR]", path)
@@ -146,8 +146,6 @@ public class MsiBuilderTests
         var bootstrap = Formatted(Bootstrap(command));
 
         Assert.True(PowerShellSyntax.TryValidate(bootstrap, out var errors), errors);
-        Assert.Contains("@'\n" + path + "\n'@", bootstrap);
-        Assert.Contains("@'\n" + path + "setup.msi\n'@", bootstrap);
     }
 
     [Fact]

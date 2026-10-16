@@ -2,9 +2,11 @@ param(
     [Parameter(Mandatory)][string]$BuilderPath,
     [string]$LegacyBuilderPath,
     [string]$SigningThumbprint,
+    [switch]$LegacyOnly,
     [string]$RunDirectory = (Join-Path $env:TEMP ('cimipkg-sandbox-' + [guid]::NewGuid().ToString('N')))
 )
 $ErrorActionPreference = 'Stop'
+if ($LegacyOnly -and -not $LegacyBuilderPath) { throw 'LegacyOnly requires LegacyBuilderPath.' }
 $builder = (Resolve-Path -LiteralPath $BuilderPath).ProviderPath
 if (Test-Path -LiteralPath $RunDirectory) { throw 'Use a new run directory to avoid stale results.' }
 Get-Command WindowsSandbox.exe -ErrorAction Stop | Out-Null
@@ -85,6 +87,10 @@ postinstall_action: none
             if ($LASTEXITCODE) { throw 'Could not export the read-only VBScript registry fixture.' }
         }
     }
+    foreach ($name in 'VBScript', 'VBScript.Encode') {
+        & reg.exe export "HKLM\SOFTWARE\Classes\$name" "$inputDir\progid-$name.reg" /y | Out-Null
+        if ($LASTEXITCODE) { throw 'Could not export the read-only VBScript ProgID fixture.' }
+    }
 }
 if ($SigningThumbprint) {
     $cert = Get-Item "Cert:\CurrentUser\My\$SigningThumbprint"
@@ -101,6 +107,7 @@ if ($SigningThumbprint) {
 Copy-Item "$PSScriptRoot\Test-VBScriptFreeSandbox.ps1" $inputDir
 $inputXml = [Security.SecurityElement]::Escape($inputDir)
 $outputXml = [Security.SecurityElement]::Escape($outputDir)
+$legacySwitch = if ($LegacyOnly) { '-LegacyOnly' } else { '' }
 @"
 <Configuration>
   <Networking>Disable</Networking>
@@ -110,7 +117,7 @@ $outputXml = [Security.SecurityElement]::Escape($outputDir)
     <MappedFolder><HostFolder>$inputXml</HostFolder><SandboxFolder>C:\ValidationInput</SandboxFolder><ReadOnly>true</ReadOnly></MappedFolder>
     <MappedFolder><HostFolder>$outputXml</HostFolder><SandboxFolder>C:\ValidationOutput</SandboxFolder><ReadOnly>false</ReadOnly></MappedFolder>
   </MappedFolders>
-  <LogonCommand><Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ValidationInput\Test-VBScriptFreeSandbox.ps1 -ShutdownWhenDone</Command></LogonCommand>
+  <LogonCommand><Command>powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ValidationInput\Test-VBScriptFreeSandbox.ps1 -ShutdownWhenDone $legacySwitch</Command></LogonCommand>
 </Configuration>
 "@ | Set-Content "$RunDirectory\validation.wsb" -Encoding utf8
 Start-Process WindowsSandbox.exe -ArgumentList ('"' + "$RunDirectory\validation.wsb" + '"')
